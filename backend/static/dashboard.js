@@ -28,6 +28,7 @@
     { label: '1W', value: 'W' },
   ];
   const AUTO_REFRESH_MS = 300000;
+  const RRG_REFRESH_MS = 60000;
   const QUADRANT_COLORS = {
     Leading: '#34d399',
     Weakening: '#f59e0b',
@@ -985,7 +986,7 @@
             <div>
               <div class="section-kicker">ETF RRG</div>
               <h2>Sector ETF relative rotation</h2>
-              <p>Relative Rotation Graph style view for the SPDR sector set versus SPY.</p>
+              <p>Relative Rotation Graph view for the SPDR sector set versus SPY, with the latest point overlaid from live ETF prices.</p>
             </div>
             <button class="action-btn" data-refresh="rrg">Refresh RRG</button>
           </div>
@@ -1709,7 +1710,7 @@
     window.setInterval(() => { if (state.postmarket) loadPostmarket(true); }, AUTO_REFRESH_MS);
     window.setInterval(() => loadThemes(true), AUTO_REFRESH_MS);
     window.setInterval(() => loadEtfs(true), AUTO_REFRESH_MS);
-    window.setInterval(() => loadRrg(true), AUTO_REFRESH_MS);
+    window.setInterval(() => loadRrg(true), RRG_REFRESH_MS);
     window.setInterval(() => { if (state.earnings) loadEarnings(true); }, AUTO_REFRESH_MS);
     window.setInterval(() => { if (state.monitor) loadMonitor(true); }, AUTO_REFRESH_MS);
     window.setInterval(() => loadBrief(true), AUTO_REFRESH_MS);

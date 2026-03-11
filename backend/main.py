@@ -117,7 +117,7 @@ def etf_dashboard():
 
 @app.get('/api/etf-rrg')
 def etf_rrg():
-    cached = get_cached('etf_rrg', ttl=180)
+    cached = get_cached('etf_rrg', ttl=60)
     if cached:
         return cached
     data = get_etf_rrg_data()

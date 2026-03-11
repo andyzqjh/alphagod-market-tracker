@@ -410,6 +410,44 @@ def _return_pct(series: pd.Series, periods: int) -> Optional[float]:
     return round(((series.iloc[-1] - base) / base) * 100, 2)
 
 
+def _latest_rrg_price(quote_data: dict) -> Optional[float]:
+    return _safe_float(
+        quote_data.get('extended_price')
+        or quote_data.get('price')
+        or quote_data.get('post_market_price')
+        or quote_data.get('pre_market_price')
+    )
+
+
+def _latest_rrg_change_pct(quote_data: dict) -> Optional[float]:
+    return _safe_float(
+        quote_data.get('extended_change_pct')
+        or quote_data.get('change_pct')
+        or quote_data.get('post_market_change_pct')
+        or quote_data.get('pre_market_change_pct')
+    )
+
+
+def _overlay_live_rrg_point(series: pd.Series, live_price: Optional[float]) -> pd.Series:
+    if series.empty or live_price in (None, 0):
+        return series
+
+    updated = series.copy()
+    live_index = pd.Timestamp(datetime.now(timezone.utc).replace(tzinfo=None))
+    last_index = updated.index[-1]
+
+    if last_index.date() == live_index.date():
+        updated.iloc[-1] = live_price
+        return updated
+
+    if live_index > last_index:
+        updated.loc[live_index] = live_price
+    else:
+        updated.iloc[-1] = live_price
+
+    return updated.sort_index()
+
+
 def _stock_row_from_quote(quote_data: dict) -> Optional[dict]:
     if not quote_data:
         return None
@@ -785,6 +823,9 @@ def get_etf_rrg_data() -> dict:
         }
 
     quotes = _batch_fetch_quotes(universe)
+    benchmark_quote = quotes.get(benchmark_symbol, {})
+    benchmark_live_price = _latest_rrg_price(benchmark_quote)
+    benchmark_series_live = _overlay_live_rrg_point(benchmark_series, benchmark_live_price)
     items = []
 
     for item in SECTOR_ETFS:
@@ -793,7 +834,10 @@ def get_etf_rrg_data() -> dict:
         if asset_series.empty:
             continue
 
-        aligned = pd.concat([asset_series, benchmark_series], axis=1, join='inner').dropna()
+        quote_data = quotes.get(symbol, {})
+        live_price = _latest_rrg_price(quote_data)
+        asset_series_live = _overlay_live_rrg_point(asset_series, live_price)
+        aligned = pd.concat([asset_series_live, benchmark_series_live], axis=1, join='inner').dropna()
         aligned.columns = ['asset', 'benchmark']
         if len(aligned) < 16:
             continue
@@ -808,18 +852,20 @@ def get_etf_rrg_data() -> dict:
         trail = frame.tail(8)
         latest = trail.iloc[-1]
         weekly_change_pct = _return_pct(aligned['asset'], 1)
-        quote_data = quotes.get(symbol, {})
+        latest_price = _latest_rrg_price(quote_data) or _round_number(aligned['asset'].iloc[-1])
+        latest_change_pct = _latest_rrg_change_pct(quote_data)
 
         items.append({
             'symbol': symbol,
             'label': item['label'],
             'group': item['group'],
-            'price': quote_data.get('price') or _round_number(aligned['asset'].iloc[-1]),
-            'change_pct': quote_data.get('change_pct', weekly_change_pct),
+            'price': latest_price,
+            'change_pct': latest_change_pct if latest_change_pct is not None else weekly_change_pct,
             'weekly_change_pct': weekly_change_pct,
             'rs_ratio': _round_number(latest['rs_ratio']),
             'rs_momentum': _round_number(latest['rs_momentum']),
             'quadrant': _classify_rrg_point(float(latest['rs_ratio']), float(latest['rs_momentum'])),
+            'live_price': bool(live_price),
             'trail': [
                 {
                     'date': index.strftime('%Y-%m-%d'),
@@ -831,18 +877,18 @@ def get_etf_rrg_data() -> dict:
         })
 
     items.sort(key=lambda entry: (entry.get('quadrant') != 'Leading', -(entry.get('rs_ratio') or 0), -(entry.get('rs_momentum') or 0)))
-    benchmark_quote = quotes.get(benchmark_symbol, {})
 
     return {
         'updated_at': datetime.now(timezone.utc).isoformat(),
         'benchmark': {
             'symbol': benchmark_symbol,
             'label': benchmark_label,
-            'price': benchmark_quote.get('price'),
-            'change_pct': benchmark_quote.get('change_pct'),
+            'price': benchmark_live_price or benchmark_quote.get('price'),
+            'change_pct': _latest_rrg_change_pct(benchmark_quote) if _latest_rrg_change_pct(benchmark_quote) is not None else benchmark_quote.get('change_pct'),
         },
         'center': {'rs_ratio': 100, 'rs_momentum': 100},
         'items': items,
+        'live_prices': True,
     }
 
 

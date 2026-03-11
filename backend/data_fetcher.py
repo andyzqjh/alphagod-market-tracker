@@ -2048,12 +2048,196 @@ def _classify_session_catalyst(title: str) -> str:
     return 'Themes / Narratives'
 
 
-def _build_session_analysis_blocks(item: dict, headline: Optional[dict], category: str) -> List[dict]:
+def _join_clauses(items: List[str]) -> str:
+    cleaned = [str(item).strip().rstrip('.') for item in items if item and str(item).strip()]
+    if not cleaned:
+        return ''
+    if len(cleaned) == 1:
+        return cleaned[0]
+    if len(cleaned) == 2:
+        return f'{cleaned[0]} and {cleaned[1]}'
+    return ', '.join(cleaned[:-1]) + f', and {cleaned[-1]}'
+
+
+def _target_spread(detail: dict) -> Optional[float]:
+    price = detail.get('price')
+    target = detail.get('target_mean_price')
+    if price in (None, 0) or target is None:
+        return None
+    try:
+        return ((target - price) / price) * 100
+    except Exception:
+        return None
+
+
+def _fundamental_snapshot(detail: dict) -> str:
+    revenue_growth = detail.get('revenue_growth')
+    earnings_growth = detail.get('earnings_growth')
+    gross_margin = detail.get('gross_margin')
+    operating_margin = detail.get('operating_margin')
+    profit_margin = detail.get('profit_margin')
+    forward_pe = detail.get('forward_pe')
+    price_to_sales = detail.get('price_to_sales')
+
+    pieces = []
+    if revenue_growth is not None:
+        if revenue_growth >= 0:
+            pieces.append(f'revenue growth running near {revenue_growth:.1f}%')
+        else:
+            pieces.append(f'revenue still contracting about {abs(revenue_growth):.1f}%')
+    if earnings_growth is not None:
+        if earnings_growth >= 0:
+            pieces.append(f'earnings growth near {earnings_growth:.1f}%')
+        else:
+            pieces.append(f'earnings still down roughly {abs(earnings_growth):.1f}%')
+    if gross_margin is not None:
+        pieces.append(f'gross margin around {gross_margin:.1f}%')
+    if operating_margin is not None:
+        pieces.append(f'operating margin near {operating_margin:.1f}%')
+    if profit_margin is not None:
+        pieces.append(f'net margin around {profit_margin:.1f}%')
+    if forward_pe is not None:
+        pieces.append(f'forward P/E near {forward_pe:.1f}x')
+    elif price_to_sales is not None:
+        pieces.append(f'price-to-sales near {price_to_sales:.1f}x')
+
+    if not pieces:
+        return 'Published fundamental detail is thin, so traders will have to lean more heavily on the verified headline, estimate changes, and raw tape confirmation.'
+    return f'The broader setup still shows {_join_clauses(pieces[:5])}. That matters because the market will decide whether the headline changes this profile or only creates a one-session reaction.'
+
+
+def _valuation_context(detail: dict) -> str:
+    spread = _target_spread(detail)
+    forward_pe = detail.get('forward_pe')
+    price_to_sales = detail.get('price_to_sales')
+
+    if spread is not None and spread >= 12:
+        return f'Consensus target still sits about {spread:.1f}% above spot, so valuation still leaves room if the better story starts feeding into estimates.'
+    if spread is not None and spread <= -8:
+        return f'The stock is already trading roughly {abs(spread):.1f}% above consensus target, so upside probably needs stronger numbers than the Street currently publishes.'
+    if forward_pe is not None and forward_pe >= 30:
+        return f'At roughly {forward_pe:.1f}x forward earnings, the multiple already assumes a fair amount of quality, so the next leg needs more than a one-day headline.'
+    if forward_pe is not None and forward_pe <= 12:
+        return f'At only about {forward_pe:.1f}x forward earnings, the valuation can still rerate if execution and estimates inflect.'
+    if price_to_sales is not None and price_to_sales >= 8:
+        return f'At about {price_to_sales:.1f}x sales, investors will want cleaner proof that growth and margins can keep compounding.'
+    return 'Valuation is not extreme either way, so follow-through will depend more on estimate revisions and whether institutions keep paying for the new narrative.'
+
+
+def _catalyst_reset_read(category: str, detail: dict) -> str:
+    if category == 'Earnings':
+        return 'it reopens the debate around whether revenue is accelerating, margins are inflecting, and guidance deserves higher estimates'
+    if category == 'FDA / Clinical':
+        return 'it can materially change the probability-weighted value of the pipeline, financing flexibility, or partnering leverage'
+    if category == 'Analyst':
+        return 'it can start a broader valuation debate if other desks echo the call and the underlying numbers support higher targets'
+    if category in ('Strategic / Demand', 'M&A'):
+        return 'it can change the revenue path, customer mix, or scarcity premium if the announcement translates into real demand'
+    if category == 'Government Policy':
+        return 'it can alter demand, pricing, or cost assumptions if the policy detail turns into something operationally real'
+    return 'the market is testing whether the narrative now deserves a different multiple rather than just a one-day sympathy move'
+
+
+def _potential_catalyst_path(detail: dict, category: str) -> str:
+    revenue_growth = detail.get('revenue_growth')
+    earnings_growth = detail.get('earnings_growth')
+    operating_margin = detail.get('operating_margin')
+    gross_margin = detail.get('gross_margin')
+
+    drivers = []
+    if revenue_growth is None:
+        drivers.append('clean evidence that revenue growth is accelerating')
+    elif revenue_growth < 8:
+        drivers.append(f'a visible revenue reacceleration from the current {revenue_growth:.1f}% pace')
+    elif revenue_growth < 18:
+        drivers.append(f'revenue growth stepping up from the current {revenue_growth:.1f}% rate')
+    else:
+        drivers.append(f'proof the current roughly {revenue_growth:.1f}% revenue growth can stay durable')
+
+    if operating_margin is None:
+        drivers.append('better margin conversion')
+    elif operating_margin < 10:
+        drivers.append(f'operating margin expansion from the current {operating_margin:.1f}% base')
+    elif operating_margin < 20:
+        drivers.append(f'further operating leverage above the current {operating_margin:.1f}% operating margin')
+    else:
+        drivers.append(f'sustained margin discipline around the current {operating_margin:.1f}% operating margin')
+
+    if earnings_growth is not None:
+        if earnings_growth < 0:
+            drivers.append('an earnings-growth inflection back into positive territory')
+        elif revenue_growth is not None and earnings_growth >= revenue_growth + 8:
+            drivers.append('EPS growth continuing to outpace revenue, which would confirm leverage in the model')
+        elif earnings_growth < 10:
+            drivers.append('stronger bottom-line conversion after the top-line move')
+    elif gross_margin is not None and gross_margin < 45:
+        drivers.append(f'gross margin improvement from the current {gross_margin:.1f}% level')
+
+    if category == 'Earnings':
+        drivers.append('upward estimate revisions and better guidance credibility')
+    elif category == 'Analyst':
+        drivers.append('follow-on upgrades, higher targets, and confirmation from other desks')
+    elif category in ('Strategic / Demand', 'M&A'):
+        drivers.append('evidence the headline feeds into bookings, backlog, or better customer mix')
+    elif category == 'FDA / Clinical':
+        drivers.append('evidence the milestone improves commercialization odds rather than just sentiment')
+    elif category == 'Government Policy':
+        drivers.append('proof the policy shift turns into real demand, pricing power, or cost relief')
+    else:
+        drivers.append('continued follow-through after the open instead of a one-print spike')
+
+    driver_text = _join_clauses(drivers[:4]) or 'cleaner fundamental proof and post-open confirmation'
+    return f'For the move to keep rerating, the market likely needs {driver_text}. {_valuation_context(detail)}'
+
+
+def _tape_confirmation_read(
+    session_pct: float,
+    volume_text: str,
+    short_interest: Optional[float],
+    short_interest_text: str,
+    float_shares: Optional[float],
+    float_text: str,
+) -> str:
+    pieces = [f'The tape is showing {session_pct:+.2f}% with {volume_text}.']
+    if session_pct >= 0:
+        pieces.append('If buyers keep defending the open and the move does not fully fade, that usually means the market is treating the news as a genuine repricing attempt.')
+    else:
+        pieces.append('If sellers keep control after the open, the market is treating the headline as a real de-risking event rather than a temporary shakeout.')
+
+    if short_interest is not None and short_interest >= 10:
+        pieces.append(f'{short_interest_text.capitalize()} can add fuel if price keeps pressing in the same direction.')
+    elif float_shares is not None and float_shares <= 250_000_000:
+        pieces.append(f'With {float_text} in float, supply is not unlimited, so a strong opening drive can become self-reinforcing.')
+    else:
+        pieces.append('If early volume fades fast, the move can still collapse back into a headline spike with no durable sponsorship.')
+    return ' '.join(pieces)
+
+
+def _risk_invalidation_read(category: str, detail: dict) -> str:
+    revenue_growth = detail.get('revenue_growth')
+    operating_margin = detail.get('operating_margin')
+    if category == 'Earnings':
+        return 'The main risk is that traders pay for the print before the market sees whether the better quarter really changes the next few estimates. If revenue growth rolls back over or margin expansion fails to hold, the rerating can stall quickly.'
+    if category == 'FDA / Clinical':
+        return 'The risk is that the headline improves sentiment more than economics. If financing, commercialization, or timeline questions remain unresolved, biotech can give back a sharp initial move very quickly.'
+    if category == 'Analyst':
+        return 'Single-desk upgrades can fade fast if the broader Street does not validate the call or if the stock was already priced near a full valuation. Without estimate revisions, the move can revert into noise.'
+    if category in ('Strategic / Demand', 'M&A'):
+        return 'The key risk is that the announcement sounds important but does not translate into durable bookings, pricing power, or margin benefit. If investors cannot model the economic impact, the rerating usually cools off.'
+    if category == 'Government Policy':
+        return 'Policy-driven trades can unwind when the market realizes the path from headline to actual earnings power is slower, smaller, or less direct than first assumed.'
+    if revenue_growth is not None and revenue_growth < 8:
+        return 'The risk is that the narrative improves before the underlying growth does. Without cleaner revenue acceleration and better post-open confirmation, the tape can lose interest quickly.'
+    if operating_margin is not None and operating_margin <= 10:
+        return 'The risk is that investors still see the stock as a low-margin execution story. If the company does not prove better mix or cost control, a higher multiple may not stick.'
+    return 'The main risk is that the narrative sounds better than the actual reset in growth, margins, or estimates. If follow-through fades after the open, the move can revert into a tactical trade instead of a durable rerating.'
+
+
+def _build_session_analysis_blocks(item: dict, detail: dict, headline: Optional[dict], category: str) -> List[dict]:
     session_pct = item.get('session_pct') or 0
     session_rvol = item.get('session_rvol')
     short_interest = item.get('short_interest')
     float_shares = item.get('float_shares')
-    direction = 'upside' if session_pct >= 0 else 'downside'
     volume_text = f'{session_rvol:.2f}x extended relative volume' if session_rvol is not None else 'unclear extended-volume confirmation'
     short_interest_text = f'{short_interest:.2f}% short interest' if short_interest is not None else 'limited short-interest visibility'
     float_text = _format_share_count(float_shares) if float_shares is not None else 'an unavailable float reading'
@@ -2067,51 +2251,65 @@ def _build_session_analysis_blocks(item: dict, headline: Optional[dict], categor
         ),
     }]
 
-    if category == 'Earnings':
+    blocks.append({
+        'title': 'Fundamental Setup',
+        'body': _fundamental_snapshot(detail),
+    })
+
+    if not headline:
         blocks.append({
-            'title': 'The Beat / Surprise Factor',
-            'body': 'The headline is earnings-linked, so the key question is whether the move reflects a real reset in forward estimates or only a one-print reaction. Watch for follow-through tied to beats, raised guidance, or stronger margin language.',
+            'title': 'Potential Catalyst Path',
+            'body': _potential_catalyst_path(detail, category),
         })
         blocks.append({
-            'title': 'The Growth / Momentum',
-            'body': f'The stock is showing {session_pct:+.2f}% in the session with {volume_text}. If the open holds and the move stays supported versus the prior close, the tape is treating the result as a real repricing.',
+            'title': 'Risk / Invalidation',
+            'body': 'Without a verified company-specific catalyst, the move should still be treated as tape-first. If no real headline appears, the action can fade quickly once positioning pressure eases.',
+        })
+        return blocks
+
+    if category == 'Earnings':
+        blocks.append({
+            'title': 'Estimate Reset',
+            'body': f'This headline matters because {_catalyst_reset_read(category, detail)}. The key question is whether the quarter changes how investors model the next few prints, not just whether the last quarter looked good.',
         })
     elif category == 'FDA / Clinical':
         blocks.append({
             'title': 'The Fundamental Shift',
-            'body': 'This kind of regulatory or clinical headline matters because it can change probability-weighted future cash flows, not just sentiment. The market is testing whether the data point materially improves the path for the lead asset.',
-        })
-        blocks.append({
-            'title': 'The Statistical Edge',
-            'body': f'Biotech moves with a verified catalyst often need both strong early volume and a tight float. Here the board is seeing {volume_text} with {float_text}, so size discipline still matters.',
+            'body': f'This kind of catalyst matters because {_catalyst_reset_read(category, detail)}. The market is deciding whether the headline materially improves the path for the lead asset instead of just extending the story by a news cycle.',
         })
     elif category == 'Analyst':
         blocks.append({
             'title': 'Re-rating Potential',
-            'body': 'Analyst-driven moves can sustain when they validate a broader valuation change already building in the tape. The key is whether other desks repeat the call and whether the market keeps paying for the theme after the open.',
-        })
-        blocks.append({
-            'title': 'Explosiveness',
-            'body': f'This setup combines {session_pct:+.2f}% session action with {short_interest_text}. That mix can fuel additional squeezing, but analyst-only catalysts usually fade faster than hard earnings or regulatory news if volume drops.',
+            'body': f'The call matters because {_catalyst_reset_read(category, detail)}. Analyst-driven moves last longer when they are validating a fundamental change the market was already starting to notice.',
         })
     elif category in ('Strategic / Demand', 'M&A'):
         blocks.append({
             'title': 'Demand Signal',
-            'body': 'A strategic or demand headline matters when it changes the revenue path, customer quality, or scarcity premium around the name. The question is whether the article points to durable demand rather than a one-day narrative spike.',
+            'body': f'The headline matters because {_catalyst_reset_read(category, detail)}. The real test is whether investors can connect the announcement to durable demand instead of a one-day narrative spike.',
         })
+    elif category == 'Government Policy':
         blocks.append({
-            'title': 'Explosiveness',
-            'body': f'The move is being expressed through {volume_text}. If that keeps building into the cash open, the market is likely treating the headline as a genuine {direction} repricing rather than just a sympathy pop.',
+            'title': 'Policy Transmission',
+            'body': f'This setup matters because {_catalyst_reset_read(category, detail)}. Policy headlines only hold when the market can see a believable path into demand, pricing, cost relief, or estimate changes.',
         })
     else:
         blocks.append({
-            'title': 'Tape Confirmation',
-            'body': f'This is currently classified as {category}. Without a hard balance-sheet or earnings datapoint, the move needs volume confirmation and open-to-open follow-through to hold its {direction} profile.',
+            'title': 'Narrative Test',
+            'body': f'This is currently classified as {category}. The market is effectively testing whether {_catalyst_reset_read(category, detail)}.',
         })
-        blocks.append({
-            'title': 'Risk',
-            'body': 'Headline-driven trades without a clean fundamental reset can fade quickly if the news is already fully understood or the first spike is mostly retail positioning.',
-        })
+
+    blocks.append({
+        'title': 'Potential Catalyst Path',
+        'body': _potential_catalyst_path(detail, category),
+    })
+    blocks.append({
+        'title': 'Tape Confirmation',
+        'body': _tape_confirmation_read(session_pct, volume_text, short_interest, short_interest_text, float_shares, float_text),
+    })
+    blocks.append({
+        'title': 'Risk / Invalidation',
+        'body': _risk_invalidation_read(category, detail),
+    })
 
     return blocks
 
@@ -2136,11 +2334,9 @@ def _perception_before(detail: dict) -> str:
 def _analyst_expectation(detail: dict) -> str:
     recommendation = (detail.get('recommendation') or '').lower()
     analyst_count = detail.get('analyst_count')
-    price = detail.get('price')
-    target = detail.get('target_mean_price')
-    spread = None
-    if price not in (None, 0) and target is not None:
-        spread = ((target - price) / price) * 100
+    revenue_growth = detail.get('revenue_growth')
+    operating_margin = detail.get('operating_margin')
+    spread = _target_spread(detail)
 
     rec_text = 'Analyst stance is mixed.'
     if recommendation in ('buy', 'strong_buy'):
@@ -2159,8 +2355,16 @@ def _analyst_expectation(detail: dict) -> str:
         else:
             target_text = 'The stock is trading near consensus target levels, so follow-through matters more than headline excitement.'
 
+    quality_text = ''
+    if revenue_growth is not None and operating_margin is not None:
+        quality_text = f'The current profile shows about {revenue_growth:.1f}% revenue growth with {operating_margin:.1f}% operating margin, which helps frame how much improvement still needs to be proven.'
+    elif revenue_growth is not None:
+        quality_text = f'Revenue growth is running near {revenue_growth:.1f}%, so the next question is whether the headline can accelerate that pace.'
+    elif operating_margin is not None:
+        quality_text = f'Operating margin is around {operating_margin:.1f}%, so the rerating case still depends on whether profitability can improve from here.'
+
     coverage_text = f'{analyst_count} analysts are in the published set.' if analyst_count else 'Analyst coverage detail is thin.'
-    return f'{rec_text} {target_text} {coverage_text}'
+    return ' '.join(part for part in (rec_text, target_text, quality_text, coverage_text) if part)
 
 
 def _build_session_reasoning(item: dict, detail: dict, headlines: List[dict]) -> dict:
@@ -2169,6 +2373,7 @@ def _build_session_reasoning(item: dict, detail: dict, headlines: List[dict]) ->
     headline = headlines[0] if headlines else None
     perception_before = _perception_before(detail)
     analyst_view = _analyst_expectation(detail)
+    no_headline_path = _potential_catalyst_path(detail, 'No verified catalyst')
 
     if not headline:
         return {
@@ -2181,27 +2386,30 @@ def _build_session_reasoning(item: dict, detail: dict, headlines: List[dict]) ->
             'event_label': 'No verified catalyst',
             'perception_before': f'Before the move, the setup looked like {perception_before}.',
             'what_changed': 'Treat the tape as watchlist-only until a clean company-specific headline appears.',
-            'market_view': 'The move may still matter, but it is not being explained by a verified catalyst feed right now.',
+            'market_view': 'The move may still matter, but it is not being explained by a verified catalyst feed right now. Without a clean headline, investors will assume this is positioning until proven otherwise.',
             'analyst_view': analyst_view,
-            'reasoning': 'No verified catalyst was found in the live headline feed, so this move should be treated as tape-driven until a real source appears.',
-            'analysis_blocks': _build_session_analysis_blocks(item, None, 'No verified catalyst'),
+            'reasoning': f'No verified catalyst was found in the live headline feed, so this move should be treated as tape-driven until a real source appears. {no_headline_path}',
+            'analysis_blocks': _build_session_analysis_blocks(item, detail, None, 'No verified catalyst'),
         }
 
     category = _classify_session_catalyst(headline.get('title') or '')
     source = headline.get('source') or 'News feed'
     published_at = headline.get('published_at')
     direction = 'higher' if session_pct >= 0 else 'lower'
+    reset_read = _catalyst_reset_read(category, detail)
+    catalyst_path = _potential_catalyst_path(detail, category)
     volume_line = ''
     if session_rvol is not None:
         volume_line = f' Extended volume is running at {session_rvol:.2f}x of the 20-day average, which helps separate a catalyst-driven move from a weak headline drift.'
     reasoning = (
         f'{item.get("ticker")} is trading {direction} after "{headline.get("title")}" ({source}). '
-        f'This reads as a {category.lower()} catalyst rather than a generic tape move.{volume_line}'
+        f'This reads as a {category.lower()} catalyst because {reset_read}. '
+        f'{catalyst_path}{volume_line}'
     )
     market_view = (
-        'If the open holds, the tape is treating this as a real repricing rather than a sympathy move.'
+        f'If the open holds, the tape is treating this as a real repricing rather than a sympathy move. {catalyst_path}'
         if session_pct >= 0 else
-        'If the weakness holds into the open, the market is treating the headline as a genuine de-risking event.'
+        f'If the weakness holds into the open, the market is treating the headline as a genuine de-risking event. {catalyst_path}'
     )
     return {
         'has_verified_headline': True,
@@ -2212,11 +2420,11 @@ def _build_session_reasoning(item: dict, detail: dict, headlines: List[dict]) ->
         'headline_label': f'{source} | {_format_headline_stamp(published_at)}',
         'event_label': category,
         'perception_before': f'Before the move, the setup looked like {perception_before}.',
-        'what_changed': f'Verified lead headline: "{headline.get("title")}".',
+        'what_changed': f'Verified lead headline: "{headline.get("title")}". The new information matters because {reset_read}.',
         'market_view': market_view,
         'analyst_view': analyst_view,
         'reasoning': reasoning,
-        'analysis_blocks': _build_session_analysis_blocks(item, headline, category),
+        'analysis_blocks': _build_session_analysis_blocks(item, detail, headline, category),
     }
 
 

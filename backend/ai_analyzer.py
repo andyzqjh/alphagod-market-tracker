@@ -293,6 +293,7 @@ Return ONLY the JSON, no markdown, no extra text."""
 
 
 def _fallback_market_brief(market_overview: dict, theme_dashboard: dict, etf_dashboard: dict, headlines: List[dict]) -> dict:
+    summary = market_overview.get('summary', {})
     overview_items = market_overview.get('items', [])
     themes = theme_dashboard.get('all', [])
     etf_leaders = etf_dashboard.get('leaders', [])
@@ -302,29 +303,46 @@ def _fallback_market_brief(market_overview: dict, theme_dashboard: dict, etf_das
     weak_themes = sorted(themes, key=lambda item: item.get('avg_pct', 0))[:3]
     lead_group = etf_dashboard.get('summary', {}).get('best_group') or 'ETF groups'
     headline_text = '; '.join(item.get('title', '') for item in headlines[:4]) or 'No major headlines were available from the feed.'
+    positive = summary.get('positive', 0)
+    negative = summary.get('negative', 0)
+    neutral = summary.get('neutral', 0)
+    breadth_delta = positive - negative
+    if breadth_delta >= 4:
+        breadth_read = 'broadly constructive'
+    elif breadth_delta <= -4:
+        breadth_read = 'broadly defensive'
+    elif breadth_delta > 0:
+        breadth_read = 'slightly constructive but not one-sided'
+    elif breadth_delta < 0:
+        breadth_read = 'slightly defensive but not washed out'
+    else:
+        breadth_read = 'mixed and rotational'
 
     sentiment = 'Neutral'
-    if market_overview.get('summary', {}).get('positive', 0) > market_overview.get('summary', {}).get('negative', 0):
+    if positive > negative:
         sentiment = 'Bullish'
-    elif market_overview.get('summary', {}).get('positive', 0) < market_overview.get('summary', {}).get('negative', 0):
+    elif positive < negative:
         sentiment = 'Bearish'
 
     paragraphs = [
-        f"The tape is currently {sentiment.lower()} overall, with {market_overview.get('summary', {}).get('positive', 0)} advancing instruments versus {market_overview.get('summary', {}).get('negative', 0)} declining across the core market overview board. The biggest immediate moves are coming from {_join_moves(notable_overview, 'label', 'change_pct')}.",
-        f"Theme leadership is concentrated in {_join_moves(top_themes, 'theme', 'avg_pct')}. That tells us where traders are still willing to pay up for growth, momentum, or narrative strength inside the current session.",
-        f"On the weak side, pressure is showing up in {_join_moves(weak_themes, 'theme', 'avg_pct')}. If those groups continue to lag while leaders keep expanding, market participation is becoming more selective rather than broadly strong.",
-        f"The ETF capital-flow proxy points toward {lead_group} as the current leadership pocket. The strongest ETF leaders right now are {_join_moves(etf_leaders, 'symbol', 'change_pct', limit=4)}, while the main pressure points are {_join_moves(etf_laggards, 'symbol', 'change_pct', limit=4)}.",
-        f"Headline context is still important because the market can rotate quickly when macro narratives change. The current feed is highlighting: {headline_text}",
-        f"Tactically, the key question is whether leadership continues to broaden or narrows into only a few pockets. If ETF leadership, theme leadership, and index breadth keep confirming one another, the market can sustain upside; if they diverge, traders should expect more chop, failed breakouts, and faster sector rotations.",
+        f"The tape is reading as {breadth_read}, with {positive} advancing instruments versus {negative} decliners and {neutral} roughly unchanged on the overview board. The biggest index and cross-asset swings are still coming from {_join_moves(notable_overview, 'label', 'change_pct', limit=4)}, so the first read is whether those leaders are dragging the tape or being confirmed by the rest of the board.",
+        f"Leadership quality matters more than the raw index move, and right now the strongest thematic participation is coming from {_join_moves(top_themes, 'theme', 'avg_pct')}. When those same groups keep attracting buyers on dips, it usually means institutions are still willing to pay for growth, momentum, or narrative durability rather than just hiding in a handful of mega-caps.",
+        f"The weak side of the tape is concentrated in {_join_moves(weak_themes, 'theme', 'avg_pct')}. That matters because if lagging groups keep getting sold while the winners continue to crowd, the market can still grind higher, but it becomes a narrower and less forgiving tape with faster rotations under the surface.",
+        f"The ETF rotation board is pointing toward {lead_group} as the current capital destination. Leaders such as {_join_moves(etf_leaders, 'symbol', 'change_pct', limit=4)} are where money appears to be pressing risk, while laggards like {_join_moves(etf_laggards, 'symbol', 'change_pct', limit=4)} are the pockets being used as funding sources or avoided entirely.",
+        f"Headline context is not just background noise here because the market is still trading macro and narrative cross-currents. The live feed is emphasizing: {headline_text} That means traders need to judge whether the news is reinforcing the current leadership map or creating the next rotation out of it.",
+        f"From a tactical standpoint, the most important question is whether breadth starts to broaden behind the winners or whether leadership remains concentrated in only a few high-beta and theme-heavy groups. Broadening participation usually supports trend continuation, while narrow leadership often produces sharp index resilience on the surface but more failed breakouts and air pockets underneath.",
+        f"Into the next session, the cleanest constructive setup would be leaders holding their gains, ETF inflows staying aligned with the strongest themes, and laggards stabilizing instead of accelerating lower. If those pieces diverge, the smarter posture is to trade more selectively, keep size tighter, and treat strength as tactical until the market proves it can sustain a broader rerating.",
     ]
 
     bullets = [
-        {'tone': 'Bullish', 'text': f"Leadership theme: {top_themes[0]['theme']}"} if top_themes else {'tone': 'Neutral', 'text': 'Watch for clearer theme leadership.'},
-        {'tone': 'Bearish', 'text': f"Weakest theme: {weak_themes[0]['theme']}"} if weak_themes else {'tone': 'Neutral', 'text': 'No weak theme standout yet.'},
-        {'tone': 'Bullish', 'text': f"Top ETF flow proxy: {etf_leaders[0]['symbol']}"} if etf_leaders else {'tone': 'Neutral', 'text': 'ETF leaders unavailable.'},
-        {'tone': 'Bearish', 'text': f"Main ETF laggard: {etf_laggards[0]['symbol']}"} if etf_laggards else {'tone': 'Neutral', 'text': 'ETF laggards unavailable.'},
-        {'tone': 'Neutral', 'text': 'Use breadth plus theme confirmation before pressing size.'},
-        {'tone': 'Neutral', 'text': 'Watch whether capital stays in growth, rotates defensive, or moves into rates and commodities.'},
+        {'tone': 'Bullish', 'text': f"Leadership is being carried by {top_themes[0]['theme']}."} if top_themes else {'tone': 'Neutral', 'text': 'Watch for clearer theme leadership before leaning too hard into one narrative.'},
+        {'tone': 'Bearish', 'text': f"The weakest thematic pocket is {weak_themes[0]['theme']}, which is the first place to look for failed bounces."} if weak_themes else {'tone': 'Neutral', 'text': 'No weak theme standout has emerged yet.'},
+        {'tone': 'Bullish', 'text': f"The top ETF flow proxy is {etf_leaders[0]['symbol']}, showing where capital is still comfortable pressing."} if etf_leaders else {'tone': 'Neutral', 'text': 'ETF leadership data is limited right now.'},
+        {'tone': 'Bearish', 'text': f"The main ETF laggard is {etf_laggards[0]['symbol']}, which suggests where money is being pulled from first."} if etf_laggards else {'tone': 'Neutral', 'text': 'ETF laggard data is limited right now.'},
+        {'tone': 'Neutral', 'text': 'Breadth confirmation matters more than the index print if you are deciding whether this move can actually persist.'},
+        {'tone': 'Neutral', 'text': 'The best long setups are the names where headline support, theme leadership, and ETF rotation are all pointing the same way.'},
+        {'tone': 'Bearish', 'text': 'If winners stop broadening and laggards keep making new lows, expect a more fragile and selective tape.'},
+        {'tone': 'Neutral', 'text': 'The next real tell is whether capital stays in the current leadership bucket or rotates toward a different macro regime.'},
     ]
 
     return {
@@ -338,7 +356,7 @@ def _fallback_market_brief(market_overview: dict, theme_dashboard: dict, etf_das
 def build_market_brief(market_overview: dict, theme_dashboard: dict, etf_dashboard: dict, headlines: List[dict]) -> dict:
     fallback = _fallback_market_brief(market_overview, theme_dashboard, etf_dashboard, headlines)
 
-    prompt = f"""You are a market strategist writing a concise but insightful daily market brief for an active trader.
+    prompt = f"""You are a senior market strategist writing a smart desk-style market brief for an active trader or portfolio manager.
 
 Market overview summary:
 {json.dumps(market_overview.get('summary', {}), ensure_ascii=False)}
@@ -365,26 +383,32 @@ Return ONLY valid JSON with this exact structure:
 {{
   "title": "AI Market Brief",
   "sentiment": "Bullish",
-  "paragraphs": ["paragraph 1", "paragraph 2", "paragraph 3", "paragraph 4", "paragraph 5", "paragraph 6"],
+  "paragraphs": ["paragraph 1", "paragraph 2", "paragraph 3", "paragraph 4", "paragraph 5", "paragraph 6", "paragraph 7"],
   "bullets": [
     {{"tone": "Bullish", "text": "short point"}},
     {{"tone": "Bearish", "text": "short point"}},
     {{"tone": "Neutral", "text": "short point"}},
     {{"tone": "Bullish", "text": "short point"}},
     {{"tone": "Bearish", "text": "short point"}},
+    {{"tone": "Neutral", "text": "short point"}},
+    {{"tone": "Bullish", "text": "short point"}},
     {{"tone": "Neutral", "text": "short point"}}
   ]
 }}
 
 Rules:
-- Write exactly 6 paragraphs.
-- Each paragraph should be 2-4 sentences.
-- Focus on what is leading, what is lagging, and where capital appears to be rotating.
-- Speak in trader language, not academic language.
+- Write exactly 7 paragraphs.
+- Each paragraph should be 3-5 sentences.
+- Write like a sharp trading-desk strategist, not a newsletter writer.
+- Explain whether participation is broadening or narrowing beneath the surface.
+- Focus on what is leading, what is lagging, where capital appears to be rotating, and what that says about the next session.
+- Explicitly connect theme leadership, ETF rotation, macro/headline context, and tactical confirmation or failure signals.
+- Mention what would confirm upside follow-through and what would warn that the move is getting fragile.
+- Make the bullets actionable, specific, and one sentence each.
 - Do not use markdown.
 - Return JSON only."""
 
-    result = _call_json(prompt, fallback, max_tokens=1200)
+    result = _call_json(prompt, fallback, max_tokens=1800)
     return _merge_with_fallback(fallback, result)
 
 

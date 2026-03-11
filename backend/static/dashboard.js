@@ -557,7 +557,7 @@
                 <div>
                   <div class="section-kicker">Market Brief</div>
                   <h2>${esc(brief.title || 'AI Market Brief')}</h2>
-                  <p>Six short paragraphs on the tape, leadership, laggards, and where capital appears to be rotating.</p>
+                  <p>Desk-style market briefing on breadth, leadership, rotation, headline risk, and what needs to confirm next.</p>
                 </div>
                 <div class="soft-pill ${sentimentClass(brief.sentiment) === 'bullish' ? 'pos' : sentimentClass(brief.sentiment) === 'bearish' ? 'neg' : 'warn'}">${esc(brief.sentiment || 'Neutral')}</div>
               </div>

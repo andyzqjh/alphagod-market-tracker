@@ -1,0 +1,28 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  background-color: #0b0e11;
+  color: #e2e8f0;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+}
+
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: #141820; }
+::-webkit-scrollbar-thumb { background: #2d3748; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #4a5568; }
+
+.pos { color: #00c805; }
+.neg { color: #ff3b3b; }
+
+.grade-a { background: #00c80520; color: #00c805; border: 1px solid #00c80540; }
+.grade-b { background: #3b82f620; color: #60a5fa; border: 1px solid #3b82f640; }
+.grade-c { background: #f59e0b20; color: #fbbf24; border: 1px solid #f59e0b40; }
+.grade-d { background: #ff3b3b20; color: #ff3b3b; border: 1px solid #ff3b3b40; }
+
+.cat-earnings { background: #7c3aed20; color: #a78bfa; border: 1px solid #7c3aed40; }
+.cat-contracts { background: #0891b220; color: #22d3ee; border: 1px solid #0891b240; }
+.cat-fda { background: #dc262620; color: #f87171; border: 1px solid #dc262640; }
+.cat-themes { background: #7c3aed20; color: #c084fc; border: 1px solid #7c3aed40; }
+.cat-others { background: #37415120; color: #9ca3af; border: 1px solid #37415140; }

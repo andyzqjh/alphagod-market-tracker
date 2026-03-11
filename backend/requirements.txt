@@ -1,0 +1,8 @@
+fastapi==0.115.0
+uvicorn==0.30.6
+yfinance==0.2.50
+pandas==2.2.3
+anthropic==0.40.0
+python-dotenv==1.0.1
+requests==2.32.3
+aiofiles==23.2.1

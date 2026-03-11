@@ -1,0 +1,968 @@
+import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timedelta, timezone
+from typing import List, Optional
+from urllib.parse import quote as url_quote
+
+import pandas as pd
+import requests
+import yfinance as yf
+
+from themes_config import ETF_UNIVERSE, MARKET_OVERVIEW, SECTOR_ETF_BENCHMARK, SECTOR_ETFS, THEMES
+from universe import STOCK_UNIVERSE
+
+YAHOO_QUOTE_URL = 'https://query1.finance.yahoo.com/v7/finance/quote'
+YAHOO_CHART_URL = 'https://query1.finance.yahoo.com/v8/finance/chart/{symbol}'
+REQUEST_TIMEOUT = 12
+QUOTE_BATCH_SIZE = 40
+GROUP_ORDER = ['Broad Market', 'Style & Factors', 'Sectors', 'Rates & Credit', 'Commodities', 'International', 'Thematic', 'Digital Assets']
+
+SESSION = requests.Session()
+SESSION.headers.update({
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+                  '(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+})
+LOGGER = logging.getLogger(__name__)
+
+THEME_LOOKUP = {}
+for theme_name, tickers in THEMES.items():
+    for ticker in tickers:
+        THEME_LOOKUP.setdefault(ticker, []).append(theme_name)
+
+
+def _safe_float(value):
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _safe_int(value):
+    try:
+        if value is None:
+            return None
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _round_number(value, digits: int = 2):
+    number = _safe_float(value)
+    return round(number, digits) if number is not None else None
+
+
+def _chunked(items: List[str], size: int):
+    for index in range(0, len(items), size):
+        yield items[index:index + size]
+
+
+def _request_json(url: str, params: Optional[dict] = None) -> dict:
+    response = SESSION.get(url, params=params, timeout=REQUEST_TIMEOUT)
+    response.raise_for_status()
+    return response.json()
+
+
+def _shape_quote(raw: dict) -> Optional[dict]:
+    symbol = raw.get('symbol')
+    if not symbol:
+        return None
+
+    price = _safe_float(raw.get('regularMarketPrice'))
+    previous_close = _safe_float(raw.get('regularMarketPreviousClose') or raw.get('previousClose'))
+    change = _safe_float(raw.get('regularMarketChange'))
+    change_pct = _safe_float(raw.get('regularMarketChangePercent'))
+    pre_market_price = _safe_float(raw.get('preMarketPrice'))
+    pre_market_change_pct = _safe_float(raw.get('preMarketChangePercent'))
+    post_market_price = _safe_float(raw.get('postMarketPrice'))
+    post_market_change_pct = _safe_float(raw.get('postMarketChangePercent'))
+
+    if pre_market_change_pct is None and pre_market_price is not None and previous_close not in (None, 0):
+        pre_market_change_pct = ((pre_market_price - previous_close) / previous_close) * 100
+    if post_market_change_pct is None and post_market_price is not None and previous_close not in (None, 0):
+        post_market_change_pct = ((post_market_price - previous_close) / previous_close) * 100
+
+    extended_price = pre_market_price if pre_market_price is not None else post_market_price
+    extended_change_pct = pre_market_change_pct if pre_market_price is not None else post_market_change_pct
+    extended_session = 'pre' if pre_market_price is not None else ('post' if post_market_price is not None else None)
+
+    return {
+        'symbol': symbol,
+        'price': _round_number(price),
+        'previous_close': _round_number(previous_close),
+        'change': _round_number(change),
+        'change_pct': _round_number(change_pct),
+        'pre_market_price': _round_number(pre_market_price),
+        'pre_market_change_pct': _round_number(pre_market_change_pct),
+        'post_market_price': _round_number(post_market_price),
+        'post_market_change_pct': _round_number(post_market_change_pct),
+        'extended_price': _round_number(extended_price),
+        'extended_change_pct': _round_number(extended_change_pct),
+        'extended_session': extended_session,
+        'volume': _safe_int(raw.get('regularMarketVolume') or raw.get('volume')),
+        'average_volume': _safe_int(raw.get('averageDailyVolume3Month') or raw.get('averageDailyVolume10Day')),
+        'market_cap': _safe_float(raw.get('marketCap')),
+        'day_high': _round_number(raw.get('regularMarketDayHigh') or raw.get('regularMarketOpen')),
+        'day_low': _round_number(raw.get('regularMarketDayLow') or raw.get('regularMarketOpen')),
+        'currency': raw.get('financialCurrency') or raw.get('currency') or 'USD',
+        'market_state': raw.get('marketState'),
+        'long_name': raw.get('longName') or raw.get('shortName') or symbol,
+        'quote_source': 'yahoo_quote_api',
+    }
+
+
+def _empty_stock_row(ticker: str) -> dict:
+    return {
+        'ticker': ticker,
+        'company_name': ticker,
+        'premarket_pct': None,
+        'premarket_price': None,
+        'daily_pct': None,
+        'display_pct': None,
+        'curr_price': None,
+        'prev_close': None,
+        'volume': None,
+        'avg_volume': None,
+        'rvol': None,
+        'market_cap': None,
+        'themes': THEME_LOOKUP.get(ticker, []),
+        'quote_status': 'unavailable',
+    }
+
+
+def _fetch_yfinance_quote(symbol: str) -> Optional[dict]:
+    try:
+        ticker = yf.Ticker(symbol)
+        history = ticker.history(period='1mo', interval='1d', auto_adjust=False, prepost=False)
+        if history.empty or 'Close' not in history:
+            return None
+
+        history = history.dropna(subset=['Close']).copy()
+        if history.empty:
+            return None
+
+        fast_info = {}
+        info = {}
+        try:
+            fast_info = dict(ticker.fast_info or {})
+        except Exception:
+            fast_info = {}
+
+        try:
+            info = ticker.info or {}
+        except Exception:
+            info = {}
+
+        latest = history.iloc[-1]
+        previous_close = _safe_float(fast_info.get('previousClose'))
+        if previous_close is None and len(history) >= 2:
+            previous_close = _safe_float(history['Close'].iloc[-2])
+
+        price = _safe_float(fast_info.get('lastPrice'))
+        if price is None:
+            price = _safe_float(latest.get('Close'))
+
+        change = None
+        change_pct = None
+        if price is not None and previous_close not in (None, 0):
+            change = price - previous_close
+            change_pct = ((price - previous_close) / previous_close) * 100
+
+        avg_volume = _safe_int(fast_info.get('threeMonthAverageVolume') or fast_info.get('tenDayAverageVolume'))
+        if avg_volume is None and 'Volume' in history:
+            avg_volume = _safe_int(history['Volume'].tail(min(len(history), 20)).mean())
+
+        volume = _safe_int(fast_info.get('lastVolume'))
+        if volume is None:
+            volume = _safe_int(latest.get('Volume'))
+
+        return {
+            'symbol': symbol,
+            'price': _round_number(price),
+            'previous_close': _round_number(previous_close),
+            'change': _round_number(change),
+            'change_pct': _round_number(change_pct),
+            'pre_market_price': None,
+            'pre_market_change_pct': None,
+            'post_market_price': None,
+            'post_market_change_pct': None,
+            'extended_price': None,
+            'extended_change_pct': None,
+            'extended_session': None,
+            'volume': volume,
+            'average_volume': avg_volume,
+            'market_cap': _safe_float(info.get('marketCap')),
+            'day_high': _round_number(fast_info.get('dayHigh') or latest.get('High') or price),
+            'day_low': _round_number(fast_info.get('dayLow') or latest.get('Low') or price),
+            'currency': info.get('currency') or 'USD',
+            'market_state': None,
+            'long_name': info.get('longName') or info.get('shortName') or symbol,
+            'quote_source': 'yfinance_fallback',
+        }
+    except Exception as exc:
+        LOGGER.warning('Fallback quote fetch failed for %s: %s', symbol, exc)
+        return None
+
+
+def _batch_fetch_yfinance_quotes(symbols: List[str]) -> dict:
+    fallback_map = {}
+    if not symbols:
+        return fallback_map
+
+    with ThreadPoolExecutor(max_workers=min(len(symbols), 8)) as executor:
+        futures = {executor.submit(_fetch_yfinance_quote, symbol): symbol for symbol in symbols}
+        for future in as_completed(futures):
+            shaped = future.result()
+            if shaped:
+                fallback_map[shaped['symbol']] = shaped
+
+    return fallback_map
+
+
+def _fetch_chart_quote(symbol: str) -> Optional[dict]:
+    frame = _fetch_chart_frame(symbol, range_value='10d', interval='1d')
+    if frame.empty or len(frame) < 2:
+        return None
+
+    close = frame['adjclose'].ffill()
+    latest_row = frame.iloc[-1]
+    latest_close = _safe_float(close.iloc[-1])
+    previous_close = _safe_float(close.iloc[-2]) if len(close) >= 2 else None
+    if latest_close is None:
+        return None
+
+    change = None
+    change_pct = None
+    if previous_close not in (None, 0):
+        change = latest_close - previous_close
+        change_pct = ((latest_close - previous_close) / previous_close) * 100
+
+    avg_volume = None
+    if 'volume' in frame and len(frame['volume'].dropna()) > 0:
+        avg_volume = _safe_int(frame['volume'].tail(min(len(frame), 20)).mean())
+
+    return {
+        'symbol': symbol,
+        'price': _round_number(latest_close),
+        'previous_close': _round_number(previous_close),
+        'change': _round_number(change),
+        'change_pct': _round_number(change_pct),
+        'pre_market_price': None,
+        'pre_market_change_pct': None,
+        'post_market_price': None,
+        'post_market_change_pct': None,
+        'extended_price': None,
+        'extended_change_pct': None,
+        'extended_session': None,
+        'volume': _safe_int(latest_row.get('volume')),
+        'average_volume': avg_volume,
+        'market_cap': None,
+        'day_high': _round_number(latest_row.get('high') or latest_close),
+        'day_low': _round_number(latest_row.get('low') or latest_close),
+        'currency': 'USD',
+        'market_state': None,
+        'long_name': symbol,
+        'quote_source': 'chart_fallback',
+    }
+
+
+def _batch_fetch_chart_quotes(symbols: List[str]) -> dict:
+    quote_map = {}
+    if not symbols:
+        return quote_map
+
+    with ThreadPoolExecutor(max_workers=min(len(symbols), 8)) as executor:
+        futures = {executor.submit(_fetch_chart_quote, symbol): symbol for symbol in symbols}
+        for future in as_completed(futures):
+            symbol = futures[future]
+            try:
+                shaped = future.result()
+            except Exception as exc:
+                LOGGER.warning('Chart quote fallback failed for %s: %s', symbol, exc)
+                continue
+            if shaped:
+                quote_map[symbol] = shaped
+
+    return quote_map
+
+
+def _batch_fetch_quotes(symbols: List[str]) -> dict:
+    unique_symbols = list(dict.fromkeys(symbols))
+    quote_map = {}
+
+    for chunk in _chunked(unique_symbols, QUOTE_BATCH_SIZE):
+        try:
+            data = _request_json(YAHOO_QUOTE_URL, params={'symbols': ','.join(chunk)})
+        except Exception as exc:
+            LOGGER.warning('Primary Yahoo quote batch failed for %s: %s', ','.join(chunk), exc)
+            continue
+
+        for raw in data.get('quoteResponse', {}).get('result', []):
+            shaped = _shape_quote(raw)
+            if shaped:
+                quote_map[shaped['symbol']] = shaped
+
+    missing_symbols = [symbol for symbol in unique_symbols if symbol not in quote_map]
+    if missing_symbols:
+        quote_map.update(_batch_fetch_chart_quotes(missing_symbols))
+
+    missing_symbols = [symbol for symbol in unique_symbols if symbol not in quote_map]
+    if missing_symbols:
+        quote_map.update(_batch_fetch_yfinance_quotes(missing_symbols))
+
+    return quote_map
+
+def _fetch_single_quote(symbol: str) -> Optional[dict]:
+    return _batch_fetch_quotes([symbol]).get(symbol)
+
+
+def _fetch_chart_frame(symbol: str, range_value: str = '1y', interval: str = '1d') -> pd.DataFrame:
+    try:
+        data = _request_json(
+            YAHOO_CHART_URL.format(symbol=url_quote(symbol, safe='')),
+            params={
+                'range': range_value,
+                'interval': interval,
+                'includePrePost': 'false',
+                'events': 'div,splits',
+            },
+        )
+        result = data.get('chart', {}).get('result') or []
+        if not result:
+            return pd.DataFrame()
+
+        payload = result[0]
+        timestamps = payload.get('timestamp') or []
+        quotes = payload.get('indicators', {}).get('quote', [{}])[0]
+        if not timestamps or not quotes:
+            return pd.DataFrame()
+
+        count = min(
+            len(timestamps),
+            len(quotes.get('open', timestamps)),
+            len(quotes.get('high', timestamps)),
+            len(quotes.get('low', timestamps)),
+            len(quotes.get('close', timestamps)),
+            len(quotes.get('volume', timestamps)),
+        )
+        if count == 0:
+            return pd.DataFrame()
+
+        frame = pd.DataFrame({
+            'open': quotes.get('open', [])[:count],
+            'high': quotes.get('high', [])[:count],
+            'low': quotes.get('low', [])[:count],
+            'close': quotes.get('close', [])[:count],
+            'volume': quotes.get('volume', [])[:count],
+        })
+
+        adjclose = payload.get('indicators', {}).get('adjclose', [])
+        if adjclose:
+            frame['adjclose'] = adjclose[0].get('adjclose', [])[:count]
+        else:
+            frame['adjclose'] = frame['close']
+
+        frame.index = pd.to_datetime(timestamps[:count], unit='s', utc=True).tz_convert(None)
+        frame = frame.apply(pd.to_numeric, errors='coerce').dropna(subset=['close']).sort_index()
+        return frame
+    except Exception:
+        return pd.DataFrame()
+
+
+def _compute_rsi(series: pd.Series, period: int = 14) -> Optional[float]:
+    if len(series) < period + 1:
+        return None
+    delta = series.diff()
+    gains = delta.clip(lower=0)
+    losses = -delta.clip(upper=0)
+    avg_gain = gains.rolling(period).mean()
+    avg_loss = losses.rolling(period).mean()
+    if avg_loss.iloc[-1] == 0:
+        return 100.0
+    rs = avg_gain.iloc[-1] / avg_loss.iloc[-1]
+    return 100 - (100 / (1 + rs))
+
+
+def _return_pct(series: pd.Series, periods: int) -> Optional[float]:
+    if len(series) <= periods:
+        return None
+    base = series.iloc[-periods - 1]
+    if base in (None, 0):
+        return None
+    return round(((series.iloc[-1] - base) / base) * 100, 2)
+
+
+def _stock_row_from_quote(quote_data: dict) -> Optional[dict]:
+    if not quote_data:
+        return None
+
+    pre_pct = quote_data.get('pre_market_change_pct')
+    daily_pct = quote_data.get('change_pct')
+    volume = quote_data.get('volume') or 0
+    avg_vol = quote_data.get('average_volume') or 1
+    rvol = round(volume / avg_vol, 2) if avg_vol and avg_vol > 0 else 1.0
+    display_pct = pre_pct if (daily_pct is None or daily_pct == 0.0) and pre_pct is not None else daily_pct
+
+    return {
+        'ticker': quote_data['symbol'],
+        'company_name': quote_data.get('long_name') or quote_data['symbol'],
+        'premarket_pct': pre_pct,
+        'premarket_price': quote_data.get('pre_market_price'),
+        'daily_pct': daily_pct,
+        'display_pct': display_pct,
+        'curr_price': quote_data.get('price'),
+        'prev_close': quote_data.get('previous_close'),
+        'volume': int(volume),
+        'avg_volume': int(avg_vol) if avg_vol else None,
+        'rvol': rvol,
+        'market_cap': quote_data.get('market_cap'),
+        'themes': THEME_LOOKUP.get(quote_data['symbol'], []),
+    }
+
+
+def get_market_overview() -> dict:
+    quotes = _batch_fetch_quotes([item['symbol'] for item in MARKET_OVERVIEW])
+    items = []
+
+    for item in MARKET_OVERVIEW:
+        quote_data = quotes.get(item['symbol']) or {}
+        items.append({
+            'symbol': item['symbol'],
+            'label': item['label'],
+            'group': item['group'],
+            'price': quote_data.get('price'),
+            'change': quote_data.get('change'),
+            'change_pct': quote_data.get('change_pct'),
+            'previous_close': quote_data.get('previous_close'),
+            'extended_price': quote_data.get('extended_price'),
+            'extended_change_pct': quote_data.get('extended_change_pct'),
+            'extended_session': quote_data.get('extended_session'),
+            'day_high': quote_data.get('day_high'),
+            'day_low': quote_data.get('day_low'),
+            'volume': quote_data.get('volume'),
+            'currency': quote_data.get('currency'),
+            'quote_status': 'available' if quote_data else 'unavailable',
+        })
+
+    positive = sum(1 for item in items if (item.get('change_pct') or 0) > 0)
+    negative = sum(1 for item in items if (item.get('change_pct') or 0) < 0)
+    flat = len(items) - positive - negative
+
+    return {
+        'updated_at': datetime.now(timezone.utc).isoformat(),
+        'summary': {
+            'positive': positive,
+            'negative': negative,
+            'flat': flat,
+        },
+        'items': items,
+    }
+
+def get_stock_detail(ticker: str) -> dict:
+    quote_data = _fetch_single_quote(ticker) or {}
+    info = {}
+    try:
+        info = yf.Ticker(ticker).info or {}
+    except Exception:
+        info = {}
+
+    volume = quote_data.get('volume') or info.get('volume') or 0
+    avg_volume = quote_data.get('average_volume') or info.get('averageVolume') or 1
+    rvol = round(volume / avg_volume, 2) if avg_volume and avg_volume > 0 else 1.0
+    short_pct = info.get('shortPercentOfFloat')
+
+    return {
+        'ticker': ticker,
+        'company_name': quote_data.get('long_name') or info.get('longName', ticker),
+        'price': quote_data.get('price'),
+        'change_pct': quote_data.get('change_pct'),
+        'premarket_pct': quote_data.get('pre_market_change_pct'),
+        'premarket_price': quote_data.get('pre_market_price'),
+        'prev_close': quote_data.get('previous_close') or info.get('previousClose'),
+        'volume': int(volume),
+        'avg_volume': int(avg_volume),
+        'rvol': rvol,
+        'short_interest': round(float(short_pct) * 100, 1) if short_pct else None,
+        'float_shares': info.get('floatShares'),
+        'industry': info.get('industry'),
+        'sector': info.get('sector'),
+        'market_cap': quote_data.get('market_cap') or info.get('marketCap'),
+        'description': info.get('longBusinessSummary', '')[:600] if info.get('longBusinessSummary') else '',
+        'themes': THEME_LOOKUP.get(ticker, []),
+    }
+
+
+def get_chart_snapshot(ticker: str) -> dict:
+    frame = _fetch_chart_frame(ticker, range_value='1y', interval='1d')
+    quote_data = _fetch_single_quote(ticker) or {}
+    detail = get_stock_detail(ticker)
+
+    if frame.empty:
+        return {
+            'ticker': ticker,
+            'detail': detail,
+            'metrics': {},
+            'error': 'Unable to load chart data right now.',
+        }
+
+    close = frame['adjclose'].ffill()
+    volume = frame['volume'].fillna(0)
+    latest_close = close.iloc[-1]
+
+    sma20 = close.rolling(20).mean().iloc[-1] if len(close) >= 20 else None
+    sma50 = close.rolling(50).mean().iloc[-1] if len(close) >= 50 else None
+    sma200 = close.rolling(200).mean().iloc[-1] if len(close) >= 200 else None
+    high20 = close.tail(20).max() if len(close) >= 20 else close.max()
+    low20 = close.tail(20).min() if len(close) >= 20 else close.min()
+    high52 = close.max()
+    low52 = close.min()
+    avg_volume20 = volume.tail(20).mean() if len(volume) >= 20 else volume.mean()
+    relative_volume20 = round(volume.iloc[-1] / avg_volume20, 2) if avg_volume20 else None
+    rsi14 = _compute_rsi(close, 14)
+
+    trend_state = 'Range-bound'
+    if sma20 and sma50 and sma200:
+        if latest_close > sma20 > sma50 > sma200:
+            trend_state = 'Strong uptrend'
+        elif latest_close < sma20 < sma50 < sma200:
+            trend_state = 'Strong downtrend'
+        elif latest_close > sma50 > sma200:
+            trend_state = 'Constructive uptrend'
+        elif latest_close < sma50 < sma200:
+            trend_state = 'Weakening downtrend'
+
+    price_vs_high20 = round(((latest_close / high20) - 1) * 100, 2) if high20 else None
+    price_vs_high52 = round(((latest_close / high52) - 1) * 100, 2) if high52 else None
+
+    return {
+        'ticker': ticker,
+        'detail': detail,
+        'metrics': {
+            'last_close': _round_number(latest_close),
+            'sma20': _round_number(sma20),
+            'sma50': _round_number(sma50),
+            'sma200': _round_number(sma200),
+            'high20': _round_number(high20),
+            'low20': _round_number(low20),
+            'high52': _round_number(high52),
+            'low52': _round_number(low52),
+            'avg_volume20': _safe_int(avg_volume20),
+            'relative_volume20': _round_number(relative_volume20),
+            'rsi14': _round_number(rsi14),
+            'return_1w': _return_pct(close, 5),
+            'return_1m': _return_pct(close, 21),
+            'return_3m': _return_pct(close, 63),
+            'price_vs_high20': price_vs_high20,
+            'price_vs_high52': price_vs_high52,
+            'trend_state': trend_state,
+            'today_open': _round_number(frame['open'].iloc[-1]),
+            'today_high': _round_number(frame['high'].iloc[-1]),
+            'today_low': _round_number(frame['low'].iloc[-1]),
+            'today_close': _round_number(frame['close'].iloc[-1]),
+            'today_volume': _safe_int(frame['volume'].iloc[-1]),
+            'change_pct': quote_data.get('change_pct'),
+        },
+        'history': [
+            {
+                'date': index.strftime('%Y-%m-%d'),
+                'close': _round_number(row['adjclose']),
+                'volume': _safe_int(row['volume']),
+            }
+            for index, row in frame.tail(120).iterrows()
+        ],
+    }
+
+
+def get_screener_data(min_pct: float = 3.0, limit: int = 25) -> list:
+    quotes = _batch_fetch_quotes(STOCK_UNIVERSE)
+    rows = []
+
+    for ticker in STOCK_UNIVERSE:
+        stock_row = _stock_row_from_quote(quotes.get(ticker))
+        if stock_row and stock_row.get('premarket_pct') is not None and stock_row['premarket_pct'] >= min_pct:
+            rows.append(stock_row)
+
+    rows.sort(key=lambda item: item.get('premarket_pct', 0), reverse=True)
+    return rows[:limit]
+
+
+def get_theme_data() -> list:
+    theme_symbols = []
+    for tickers in THEMES.values():
+        theme_symbols.extend(tickers)
+
+    quotes = _batch_fetch_quotes(theme_symbols)
+    theme_results = []
+
+    for theme_name, tickers in THEMES.items():
+        stocks = []
+        up_count = 0
+        down_count = 0
+
+        for ticker in tickers:
+            stock_row = _stock_row_from_quote(quotes.get(ticker)) or _empty_stock_row(ticker)
+            display_pct = stock_row.get('display_pct')
+            stocks.append(stock_row)
+            if display_pct is not None:
+                if display_pct > 0:
+                    up_count += 1
+                elif display_pct < 0:
+                    down_count += 1
+
+        stocks.sort(key=lambda stock: stock.get('display_pct') or 0, reverse=True)
+        valid = [stock['display_pct'] for stock in stocks if stock.get('display_pct') is not None]
+        avg_pct = round(sum(valid) / len(valid), 2) if valid else 0.0
+
+        theme_results.append({
+            'theme': theme_name,
+            'avg_pct': avg_pct,
+            'up_count': up_count,
+            'down_count': down_count,
+            'stock_count': len(stocks),
+            'leaders': stocks[:5],
+            'laggards': list(reversed(stocks[-5:])),
+            'constituents': stocks,
+        })
+
+    theme_results.sort(key=lambda item: item['avg_pct'], reverse=True)
+    return theme_results
+
+
+def get_theme_dashboard() -> dict:
+    themes = get_theme_data()
+    positive = sum(1 for theme in themes if theme.get('avg_pct', 0) > 0)
+    negative = sum(1 for theme in themes if theme.get('avg_pct', 0) < 0)
+    flat = len(themes) - positive - negative
+
+    leaders = themes[:6]
+    laggards = sorted(themes, key=lambda item: item.get('avg_pct', 0))[:6]
+
+    return {
+        'updated_at': datetime.now(timezone.utc).isoformat(),
+        'summary': {
+            'total_themes': len(themes),
+            'positive': positive,
+            'negative': negative,
+            'flat': flat,
+            'best_theme': leaders[0]['theme'] if leaders else None,
+            'worst_theme': laggards[0]['theme'] if laggards else None,
+        },
+        'leaders': leaders,
+        'laggards': laggards,
+        'all': themes,
+    }
+
+
+def get_etf_dashboard() -> dict:
+    quotes = _batch_fetch_quotes([item['symbol'] for item in ETF_UNIVERSE])
+    all_items = []
+
+    for item in ETF_UNIVERSE:
+        quote_data = quotes.get(item['symbol']) or {}
+        volume = quote_data.get('volume') or 0
+        avg_volume = quote_data.get('average_volume') or 1
+        rvol = round(volume / avg_volume, 2) if avg_volume and avg_volume > 0 else 1.0
+        change_pct = quote_data.get('change_pct') or 0.0
+        flow_proxy = round(change_pct * max(min(rvol, 5), 1), 2) if quote_data else 0.0
+
+        all_items.append({
+            'symbol': item['symbol'],
+            'label': item['label'],
+            'group': item['group'],
+            'price': quote_data.get('price'),
+            'change_pct': quote_data.get('change_pct'),
+            'extended_change_pct': quote_data.get('extended_change_pct'),
+            'extended_session': quote_data.get('extended_session'),
+            'volume': volume if quote_data else None,
+            'avg_volume': avg_volume if quote_data else None,
+            'rvol': rvol if quote_data else None,
+            'flow_proxy': flow_proxy,
+            'quote_status': 'available' if quote_data else 'unavailable',
+        })
+
+    group_map = {}
+    for item in all_items:
+        group_map.setdefault(item['group'], []).append(item)
+
+    for group_items in group_map.values():
+        group_items.sort(key=lambda entry: entry.get('flow_proxy', 0), reverse=True)
+
+    groups = [
+        {
+            'group': group,
+            'avg_change_pct': round(sum((entry.get('change_pct') or 0) for entry in entries) / len(entries), 2) if entries else 0.0,
+            'avg_flow_proxy': round(sum((entry.get('flow_proxy') or 0) for entry in entries) / len(entries), 2) if entries else 0.0,
+            'items': entries,
+        }
+        for group, entries in sorted(group_map.items(), key=lambda pair: GROUP_ORDER.index(pair[0]) if pair[0] in GROUP_ORDER else len(GROUP_ORDER))
+    ]
+
+    leaders = sorted(all_items, key=lambda entry: entry.get('flow_proxy', 0), reverse=True)[:10]
+    laggards = sorted(all_items, key=lambda entry: entry.get('flow_proxy', 0))[:10]
+    best_group = max(groups, key=lambda group: group.get('avg_flow_proxy', 0), default=None)
+
+    return {
+        'updated_at': datetime.now(timezone.utc).isoformat(),
+        'summary': {
+            'total_etfs': len(all_items),
+            'best_group': best_group['group'] if best_group else None,
+            'risk_on_proxy': next((item.get('change_pct') for item in all_items if item['symbol'] == 'QQQ'), None),
+            'defensive_proxy': next((item.get('change_pct') for item in all_items if item['symbol'] == 'TLT'), None),
+        },
+        'leaders': leaders,
+        'laggards': laggards,
+        'groups': groups,
+        'all': all_items,
+    }
+
+def _classify_rrg_point(rs_ratio: float, rs_momentum: float) -> str:
+    if rs_ratio >= 100 and rs_momentum >= 100:
+        return 'Leading'
+    if rs_ratio >= 100 and rs_momentum < 100:
+        return 'Weakening'
+    if rs_ratio < 100 and rs_momentum < 100:
+        return 'Lagging'
+    return 'Improving'
+
+
+def get_etf_rrg_data() -> dict:
+    benchmark_symbol = SECTOR_ETF_BENCHMARK['symbol']
+    benchmark_label = SECTOR_ETF_BENCHMARK['label']
+    symbols = [item['symbol'] for item in SECTOR_ETFS]
+    universe = [benchmark_symbol] + symbols
+
+    history_map = {}
+    with ThreadPoolExecutor(max_workers=min(len(universe), 8)) as executor:
+        futures = {executor.submit(_fetch_chart_frame, symbol, '2y', '1wk'): symbol for symbol in universe}
+        for future in as_completed(futures):
+            symbol = futures[future]
+            frame = future.result()
+            history_map[symbol] = frame['adjclose'] if not frame.empty else pd.Series(dtype='float64')
+
+    benchmark_series = history_map.get(benchmark_symbol, pd.Series(dtype='float64'))
+    if benchmark_series.empty:
+        return {
+            'updated_at': datetime.now(timezone.utc).isoformat(),
+            'benchmark': {'symbol': benchmark_symbol, 'label': benchmark_label},
+            'center': {'rs_ratio': 100, 'rs_momentum': 100},
+            'items': [],
+            'error': 'Unable to calculate ETF relative rotation graph right now.',
+        }
+
+    quotes = _batch_fetch_quotes(universe)
+    items = []
+
+    for item in SECTOR_ETFS:
+        symbol = item['symbol']
+        asset_series = history_map.get(symbol, pd.Series(dtype='float64'))
+        if asset_series.empty:
+            continue
+
+        aligned = pd.concat([asset_series, benchmark_series], axis=1, join='inner').dropna()
+        aligned.columns = ['asset', 'benchmark']
+        if len(aligned) < 16:
+            continue
+
+        relative_strength = (aligned['asset'] / aligned['benchmark']) * 100
+        rs_ratio = 100 + ((relative_strength / relative_strength.rolling(10).mean()) - 1) * 100
+        rs_momentum = 100 + ((rs_ratio / rs_ratio.rolling(4).mean()) - 1) * 100
+        frame = pd.DataFrame({'rs_ratio': rs_ratio, 'rs_momentum': rs_momentum}).dropna()
+        if len(frame) < 8:
+            continue
+
+        trail = frame.tail(8)
+        latest = trail.iloc[-1]
+        weekly_change_pct = _return_pct(aligned['asset'], 1)
+        quote_data = quotes.get(symbol, {})
+
+        items.append({
+            'symbol': symbol,
+            'label': item['label'],
+            'group': item['group'],
+            'price': quote_data.get('price') or _round_number(aligned['asset'].iloc[-1]),
+            'change_pct': quote_data.get('change_pct', weekly_change_pct),
+            'weekly_change_pct': weekly_change_pct,
+            'rs_ratio': _round_number(latest['rs_ratio']),
+            'rs_momentum': _round_number(latest['rs_momentum']),
+            'quadrant': _classify_rrg_point(float(latest['rs_ratio']), float(latest['rs_momentum'])),
+            'trail': [
+                {
+                    'date': index.strftime('%Y-%m-%d'),
+                    'rs_ratio': _round_number(row['rs_ratio']),
+                    'rs_momentum': _round_number(row['rs_momentum']),
+                }
+                for index, row in trail.iterrows()
+            ],
+        })
+
+    items.sort(key=lambda entry: (entry.get('quadrant') != 'Leading', -(entry.get('rs_ratio') or 0), -(entry.get('rs_momentum') or 0)))
+    benchmark_quote = quotes.get(benchmark_symbol, {})
+
+    return {
+        'updated_at': datetime.now(timezone.utc).isoformat(),
+        'benchmark': {
+            'symbol': benchmark_symbol,
+            'label': benchmark_label,
+            'price': benchmark_quote.get('price'),
+            'change_pct': benchmark_quote.get('change_pct'),
+        },
+        'center': {'rs_ratio': 100, 'rs_momentum': 100},
+        'items': items,
+    }
+
+
+
+
+
+
+
+
+def _coerce_timestamp(value) -> Optional[datetime]:
+    if value is None:
+        return None
+    try:
+        timestamp = pd.Timestamp(value)
+    except Exception:
+        return None
+    if pd.isna(timestamp):
+        return None
+    if timestamp.tzinfo is None:
+        return timestamp.to_pydatetime().replace(tzinfo=timezone.utc)
+    return timestamp.tz_convert('UTC').to_pydatetime()
+
+
+def _extract_calendar_dates(raw_value) -> List[datetime]:
+    if raw_value is None:
+        return []
+
+    values = raw_value if isinstance(raw_value, (list, tuple, set)) else [raw_value]
+    dates = []
+    for value in values:
+        timestamp = _coerce_timestamp(value)
+        if timestamp:
+            dates.append(timestamp)
+    return dates
+
+
+def _fetch_single_earnings_event(ticker: str, start_dt: datetime, end_dt: datetime) -> Optional[dict]:
+    try:
+        stock = yf.Ticker(ticker)
+    except Exception:
+        return None
+
+    getter = getattr(stock, 'get_earnings_dates', None)
+    if callable(getter):
+        try:
+            frame = getter(limit=12)
+            if isinstance(frame, pd.DataFrame) and not frame.empty:
+                working = frame.reset_index()
+                date_column = working.columns[0]
+                for _, row in working.iterrows():
+                    earnings_dt = _coerce_timestamp(row.get(date_column))
+                    if not earnings_dt or earnings_dt < start_dt or earnings_dt > end_dt:
+                        continue
+                    return {
+                        'ticker': ticker,
+                        'earnings_date': earnings_dt,
+                        'eps_estimate': _round_number(row.get('EPS Estimate')),
+                        'reported_eps': _round_number(row.get('Reported EPS')),
+                        'surprise_pct': _round_number(row.get('Surprise(%)')),
+                    }
+        except Exception:
+            pass
+
+    try:
+        calendar = stock.calendar
+    except Exception:
+        calendar = None
+
+    raw_dates = None
+    if isinstance(calendar, dict):
+        raw_dates = calendar.get('Earnings Date') or calendar.get('Earnings Date*')
+    elif isinstance(calendar, pd.DataFrame):
+        if 'Earnings Date' in calendar.columns:
+            raw_dates = calendar['Earnings Date'].tolist()
+        elif 'Earnings Date' in calendar.index:
+            raw_dates = calendar.loc['Earnings Date'].tolist()
+
+    for earnings_dt in _extract_calendar_dates(raw_dates):
+        if start_dt <= earnings_dt <= end_dt:
+            return {
+                'ticker': ticker,
+                'earnings_date': earnings_dt,
+                'eps_estimate': None,
+                'reported_eps': None,
+                'surprise_pct': None,
+            }
+
+    return None
+
+
+def get_earnings_tracker(days_ahead: int = 14, limit: int = 120) -> dict:
+    start_dt = datetime.now(timezone.utc) - timedelta(hours=18)
+    end_dt = datetime.now(timezone.utc) + timedelta(days=max(days_ahead, 1))
+
+    tracked_universe = list(dict.fromkeys(STOCK_UNIVERSE + [ticker for tickers in THEMES.values() for ticker in tickers]))
+    events = []
+
+    with ThreadPoolExecutor(max_workers=min(len(tracked_universe), 10)) as executor:
+        futures = {executor.submit(_fetch_single_earnings_event, ticker, start_dt, end_dt): ticker for ticker in tracked_universe}
+        for future in as_completed(futures):
+            try:
+                event = future.result()
+            except Exception as exc:
+                LOGGER.warning('Earnings lookup failed for %s: %s', futures[future], exc)
+                continue
+            if event:
+                events.append(event)
+
+    events.sort(key=lambda item: (item['earnings_date'], item['ticker']))
+    events = events[:limit]
+    quotes = _batch_fetch_quotes([item['ticker'] for item in events])
+
+    items = []
+    now_utc = datetime.now(timezone.utc)
+    for event in events:
+        ticker = event['ticker']
+        quote_data = quotes.get(ticker, {})
+        earnings_dt = event['earnings_date']
+        days_until = (earnings_dt.date() - now_utc.date()).days
+        items.append({
+            'ticker': ticker,
+            'company_name': quote_data.get('long_name') or ticker,
+            'earnings_date': earnings_dt.isoformat(),
+            'earnings_date_display': earnings_dt.strftime('%a, %b %d %Y %I:%M %p UTC'),
+            'days_until': days_until,
+            'status': 'Today' if days_until == 0 else ('Upcoming' if days_until > 0 else 'Recent'),
+            'eps_estimate': event.get('eps_estimate'),
+            'reported_eps': event.get('reported_eps'),
+            'surprise_pct': event.get('surprise_pct'),
+            'price': quote_data.get('price'),
+            'change_pct': quote_data.get('change_pct'),
+            'volume': quote_data.get('volume'),
+            'avg_volume': quote_data.get('average_volume'),
+            'rvol': round((quote_data.get('volume') or 0) / (quote_data.get('average_volume') or 1), 2) if quote_data.get('average_volume') else None,
+            'market_cap': quote_data.get('market_cap'),
+            'themes': THEME_LOOKUP.get(ticker, []),
+            'quote_status': 'available' if quote_data else 'unavailable',
+        })
+
+    theme_counts = {}
+    for item in items:
+        for theme in item.get('themes', []):
+            theme_counts[theme] = theme_counts.get(theme, 0) + 1
+    top_theme = next(iter(sorted(theme_counts, key=theme_counts.get, reverse=True)), None) if theme_counts else None
+
+    return {
+        'updated_at': datetime.now(timezone.utc).isoformat(),
+        'summary': {
+            'coverage_universe': len(tracked_universe),
+            'upcoming_count': len(items),
+            'today_count': sum(1 for item in items if item['days_until'] == 0),
+            'next_7_days': sum(1 for item in items if 0 <= item['days_until'] <= 7),
+            'with_live_quotes': sum(1 for item in items if item.get('price') is not None),
+            'top_theme': top_theme,
+        },
+        'items': items,
+    }

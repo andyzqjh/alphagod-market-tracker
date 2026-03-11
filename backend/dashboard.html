@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Market Dashboard</title>
+  <script>
+    (function () {
+      var base = window.location.protocol === 'file:' ? './backend/static' : '/static';
+      var link = document.createElement('link');
+      link.rel = 'stylesheet';
+      link.href = base + '/dashboard.css?v=20260311-4';
+      document.head.appendChild(link);
+      var script = document.createElement('script');
+      script.src = base + '/dashboard.js?v=20260311-4';
+      script.defer = true;
+      document.head.appendChild(script);
+    })();
+  </script>
+</head>
+<body>
+  <div id="app" style="padding:24px;color:#d7e4f5;font-family:'Segoe UI',sans-serif;">Loading market dashboard...</div>
+</body>
+</html>
+
+
+

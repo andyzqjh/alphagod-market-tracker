@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" /><meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Stock Dashboard</title>
+  <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/axios/dist/axios.min.js"></script>
+  <style>
+    body{background:#0b0e11;color:#e2e8f0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif}
+    ::-webkit-scrollbar{width:6px;height:6px}
+    ::-webkit-scrollbar-track{background:#141820}
+    ::-webkit-scrollbar-thumb{background:#2d3748;border-radius:3px}
+    .pos{color:#00c805}.neg{color:#ff3b3b}
+    .grade-a{background:#00c80520;color:#00c805;border:1px solid #00c80540}
+    .grade-b{background:#3b82f620;color:#60a5fa;border:1px solid #3b82f640}
+    .grade-c{background:#f59e0b20;color:#fbbf24;border:1px solid #f59e0b40}
+    .grade-d{background:#ff3b3b20;color:#ff3b3b;border:1px solid #ff3b3b40}
+    .cat-earnings{background:#7c3aed20;color:#a78bfa;border:1px solid #7c3aed40}
+    .cat-contracts{background:#0891b220;color:#22d3ee;border:1px solid #0891b240}
+    .cat-fda{background:#dc262620;color:#f87171;border:1px solid #dc262640}
+    .cat-themes{background:#7c3aed20;color:#c084fc;border:1px solid #7c3aed40}
+    .cat-others{background:#37415120;color:#9ca3af;border:1px solid #37415140}
+    .ind-on{background:#3b82f6;color:#fff}
+    .ind-off{background:#1e2530;color:#9ca3af}
+    .ind-off:hover{color:#fff}
+  </style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const {useState,useEffect,useRef} = React;
+
+const CAT_CLASS={Earnings:'cat-earnings','New Contracts Partnerships':'cat-contracts',FDA:'cat-fda','Themes Narratives':'cat-themes',Others:'cat-others'}
+function fmt(n){if(n==null)return 'n/a';if(n>=1e9)return(n/1e9).toFixed(1)+'B';if(n>=1e6)return(n/1e6).toFixed(1)+'M';if(n>=1e3)return(n/1e3).toFixed(0)+'K';return n}
+function timeAgo(ts){const s=Math.floor(Date.now()/1000-ts);if(s<60)return s+'s ago';if(s<3600)return Math.floor(s/60)+'m ago';if(s<86400)return Math.floor(s/3600)+'h ago';return Math.floor(s/86400)+'d ago'}
+function PctBadge({v}){if(v==null)return null;return<span className={'font-bold '+(v>=0?'pos':'neg')}>{v>=0?'+':''}{v.toFixed(2)}%</span>}
+
+// ── Analysis panel ──
+function AnalysisPanel({a}){
+  if(!a)return<p className='text-gray-500 text-sm p-3'>No analysis yet.</p>
+  const rows=[['Impact',a.impact],['Explosiveness',a.explosiveness],['Statistical Edge',a.statistical_edge],['Risk Factors',a.risk_factors]]
+  return<div className='p-4 space-y-3 text-sm text-gray-300'>{rows.map(([l,t])=>t?<div key={l}><div className='text-gray-500 text-xs uppercase tracking-widest mb-1'>{l}</div><div>{t}</div></div>:null)}</div>
+}
+
+// ── Theme Board ──
+function PctBar({pct}){const w=Math.min(Math.abs(pct)*8,100);return<div className='w-full h-1 bg-gray-800 rounded mt-1'><div style={{width:w+'%',background:pct>=0?'#00c805':'#ff3b3b',height:'100%',borderRadius:4}}/></div>}
+function ThemeCard({t,onTicker}){const c=t.avg_pct>=0?'#00c805':'#ff3b3b';return(
+  <div className='bg-[#141820] border border-[#1e2530] rounded-lg p-4'>
+    <div className='flex items-start justify-between mb-1'>
+      <span className='text-white font-semibold text-sm leading-tight'>{t.theme}</span>
+      <span className='font-bold text-sm ml-2 shrink-0' style={{color:c}}>{t.avg_pct>=0?'+':''}{t.avg_pct}%</span>
+    </div>
+    <PctBar pct={t.avg_pct}/>
+    <div className='flex gap-3 text-xs mt-2 mb-3'><span className='pos'>{t.up_count} up</span><span className='neg'>{t.down_count} down</span></div>
+    <div className='space-y-1'>{t.stocks.map(s=>(
+      <div key={s.ticker} className='flex justify-between'>
+        <button onClick={()=>onTicker(s.ticker)} className='text-xs text-blue-400 hover:text-white font-mono'>{s.ticker}</button>
+        <PctBadge v={s.daily_pct}/>
+      </div>
+    ))}</div>
+  </div>
+)}
+function ThemeBoard({onTicker}){
+  const [data,setData]=useState([]);const [loading,setLoading]=useState(false);const [ts,setTs]=useState(null)
+  async function load(){setLoading(true);try{const r=await axios.get('/api/themes');setData(r.data);setTs(new Date().toLocaleTimeString())}catch(e){console.error(e)}finally{setLoading(false)}}
+  useEffect(()=>{load()},[])
+  return(<div>
+    <div className='flex items-center justify-between mb-4'>
+      <div><h2 className='text-white font-bold text-lg'>Best Performing Themes</h2>{ts&&<span className='text-gray-500 text-xs'>Updated {ts}</span>}</div>
+      <button onClick={load} disabled={loading} className='px-4 py-1.5 bg-[#1e2530] text-white rounded text-sm hover:bg-[#2d3748] disabled:opacity-50'>{loading?'Loading...':'Refresh'}</button>
+    </div>
+    {loading&&data.length===0?<div className='text-center text-gray-500 py-20'><p>Fetching theme data... (~30s)</p></div>
+      :<div className='grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4'>{data.map(t=><ThemeCard key={t.theme} t={t} onTicker={onTicker}/>)}</div>}
+  </div>)
+}
+
+// ── Screener ──
+function Row({s,onChart}){
+  const [open,setOpen]=useState(false);const [analysis,setAnalysis]=useState(null);const [busy,setBusy]=useState(false)
+  const [news,setNews]=useState('');const [showNews,setShowNews]=useState(false)
+  async function analyze(nt){setBusy(true);try{const r=await axios.get('/api/analyze/'+s.ticker,{params:nt?{news:nt}:{}});setAnalysis(r.data.analysis)}catch(e){console.error(e)}finally{setBusy(false)}}
+  function toggle(){if(!open&&!analysis)analyze();setOpen(!open)}
+  const gc=analysis?'grade-'+analysis.grade?.toLowerCase():'';const cc=analysis?(CAT_CLASS[analysis.category]||'cat-others'):''
+  return(<>
+    <tr className='border-b border-[#1e2530] hover:bg-[#141820] cursor-pointer' onClick={toggle}>
+      <td className='px-3 py-2'><div className='flex gap-2 items-center'><span className='text-blue-400 font-mono font-bold text-sm'>{s.ticker}</span>{analysis&&<span className={'text-xs px-1.5 py-0.5 rounded font-bold '+gc}>{analysis.grade}</span>}</div></td>
+      <td className='px-3 py-2'><PctBadge v={s.premarket_pct}/></td>
+      <td className='px-3 py-2 text-gray-400 text-sm'>{fmt(s.volume)}</td>
+      <td className='px-3 py-2 text-gray-400 text-sm'>{s.rvol}x</td>
+      <td className='px-3 py-2'><PctBadge v={s.daily_pct}/></td>
+      <td className='px-3 py-2 text-gray-400 text-sm'>{s.curr_price?'$'+s.curr_price:'—'}</td>
+      <td className='px-3 py-2'>{analysis&&<span className={'text-xs px-2 py-0.5 rounded-full '+cc}>{analysis.category}</span>}</td>
+      <td className='px-3 py-2 text-gray-400 text-xs max-w-xs truncate'>{analysis?.brief_reasoning||(busy?'Analyzing...':'— click to analyze')}</td>
+      <td className='px-3 py-2'><button onClick={e=>{e.stopPropagation();onChart(s.ticker)}} className='text-xs text-gray-500 hover:text-white border border-[#1e2530] rounded px-2 py-0.5'>Chart</button></td>
+    </tr>
+    {open&&(<tr className='bg-[#0f1319] border-b border-[#1e2530]'><td colSpan={9} className='px-4 py-1'>
+      {busy?<p className='text-gray-500 text-sm p-3'>Analyzing with Claude AI...</p>:<AnalysisPanel a={analysis}/>}
+      <div className='px-4 pb-3'>{!showNews
+        ?<button onClick={()=>setShowNews(true)} className='text-xs text-gray-500 hover:text-white underline'>+ Add news catalyst for better analysis</button>
+        :<div className='flex gap-2'><input className='flex-1 bg-[#1e2530] border border-[#2d3748] rounded px-3 py-1.5 text-sm text-white outline-none' placeholder='Paste news headline...' value={news} onChange={e=>setNews(e.target.value)} onClick={e=>e.stopPropagation()}/><button onClick={e=>{e.stopPropagation();analyze(news);setShowNews(false)}} className='px-3 py-1.5 bg-blue-600 text-white rounded text-sm'>Re-analyze</button></div>
+      }</div>
+    </td></tr>)}
+  </>)
+}
+function Screener({onTicker}){
+  const [stocks,setStocks]=useState([]);const [loading,setLoading]=useState(false);const [minPct,setMinPct]=useState(3);const [ts,setTs]=useState(null)
+  const [manual,setManual]=useState('');const [mRes,setMRes]=useState(null);const [mBusy,setMBusy]=useState(false)
+  async function scan(){setLoading(true);try{const r=await axios.get('/api/screener?min_pct='+minPct+'&limit=30');setStocks(r.data);setTs(new Date().toLocaleTimeString())}catch(e){console.error(e)}finally{setLoading(false)}}
+  async function analyzeManual(){if(!manual)return;setMBusy(true);try{const r=await axios.get('/api/analyze/'+manual.toUpperCase());setMRes(r.data)}catch(e){console.error(e)}finally{setMBusy(false)}}
+  useEffect(()=>{scan()},[])
+  return(<div>
+    <div className='flex flex-wrap items-center gap-4 mb-4'>
+      <div><h2 className='text-white font-bold text-lg'>Pre-Market Screener</h2>{ts&&<span className='text-gray-500 text-xs'>Updated {ts}</span>}</div>
+      <div className='flex items-center gap-2 ml-auto'>
+        <span className='text-gray-500 text-sm'>Min gap %</span>
+        <input type='number' value={minPct} onChange={e=>setMinPct(Number(e.target.value))} className='w-16 bg-[#1e2530] border border-[#2d3748] rounded px-2 py-1 text-white text-sm outline-none'/>
+        <button onClick={scan} disabled={loading} className='px-4 py-1.5 bg-[#1e2530] text-white rounded text-sm hover:bg-[#2d3748] disabled:opacity-50'>{loading?'Scanning...':'Scan'}</button>
+      </div>
+    </div>
+    <div className='bg-[#141820] border border-[#1e2530] rounded-lg p-4 mb-4'>
+      <div className='text-gray-400 text-sm mb-2'>Analyze any ticker manually</div>
+      <div className='flex gap-2 flex-wrap'>
+        <input className='w-32 bg-[#0b0e11] border border-[#2d3748] rounded px-3 py-1.5 text-white text-sm font-mono uppercase outline-none' placeholder='AAPL' value={manual} onChange={e=>setManual(e.target.value.toUpperCase())} onKeyDown={e=>e.key==='Enter'&&analyzeManual()}/>
+        <button onClick={analyzeManual} disabled={mBusy||!manual} className='px-4 py-1.5 bg-blue-600 text-white rounded text-sm hover:bg-blue-700 disabled:opacity-50'>{mBusy?'Analyzing...':'Analyze'}</button>
+        {mRes&&<button onClick={()=>onTicker(mRes.ticker)} className='px-4 py-1.5 bg-[#1e2530] text-white rounded text-sm'>View Chart</button>}
+      </div>
+      {mRes?.analysis&&(<div className='mt-3'><div className='flex items-center gap-2 mb-1'><span className='text-white font-bold'>{mRes.ticker}</span><span className={'text-sm px-2 py-0.5 rounded grade-'+mRes.analysis.grade?.toLowerCase()}>Grade {mRes.analysis.grade}</span><span className={'text-xs px-2 py-0.5 rounded-full '+(CAT_CLASS[mRes.analysis.category]||'cat-others')}>{mRes.analysis.category}</span></div><div className='text-gray-400 text-sm'>{mRes.analysis.brief_reasoning}</div><AnalysisPanel a={mRes.analysis}/></div>)}
+    </div>
+    {loading&&stocks.length===0?<div className='text-center text-gray-500 py-20'><p className='text-lg mb-2'>Scanning stocks...</p><p className='text-xs'>~60s first load</p></div>
+      :stocks.length===0?<div className='text-center text-gray-500 py-20'><p>No stocks gapping over {minPct}% right now</p><p className='text-xs mt-1'>Try lowering % or check market hours (4am–9:30am ET)</p></div>
+      :<div className='bg-[#141820] border border-[#1e2530] rounded-lg overflow-x-auto'><table className='w-full'>
+        <thead><tr className='border-b border-[#1e2530]'>{['Ticker','Premkt %','Volume','RVol','Daily %','Price','Category','Reasoning',''].map(h=><th key={h} className='px-3 py-2.5 text-left text-xs text-gray-500 font-medium whitespace-nowrap'>{h}</th>)}</tr></thead>
+        <tbody>{stocks.map(s=><Row key={s.ticker} s={s} onChart={onTicker}/>)}</tbody>
+      </table></div>}
+  </div>)
+}
+
+// ── Chart with indicator toggles ──
+const INDICATORS=[
+  {label:'RSI',study:'RSI@tv-basicstudies'},
+  {label:'MACD',study:'MACD@tv-basicstudies'},
+  {label:'BB',study:'BB@tv-basicstudies'},
+  {label:'Vol',study:'Volume@tv-basicstudies'},
+  {label:'EMA9',study:'MAExp@tv-basicstudies|{"length":9}'},
+  {label:'EMA21',study:'MAExp@tv-basicstudies|{"length":21}'},
+  {label:'EMA50',study:'MAExp@tv-basicstudies|{"length":50}'},
+  {label:'EMA200',study:'MAExp@tv-basicstudies|{"length":200}'},
+  {label:'VWAP',study:'VWAP@tv-basicstudies'},
+  {label:'ATR',study:'ATR@tv-basicstudies'},
+]
+const IVS=[{l:'1m',v:'1'},{l:'5m',v:'5'},{l:'15m',v:'15'},{l:'1h',v:'60'},{l:'4h',v:'240'},{l:'1D',v:'D'},{l:'1W',v:'W'}]
+
+function ChartPage({ticker,onTicker}){
+  const [input,setInput]=useState(ticker)
+  const [iv,setIv]=useState('D')
+  const [activeInds,setActiveInds]=useState([])
+  useEffect(()=>setInput(ticker),[ticker])
+
+  function toggleInd(study){
+    setActiveInds(prev=>prev.includes(study)?prev.filter(s=>s!==study):[...prev,study])
+  }
+
+  const studiesParam=activeInds.length?'&studies='+encodeURIComponent(activeInds.join(',')):'';
+  const src='https://s.tradingview.com/widgetembed/?frameElementId=tv_chart&symbol='+encodeURIComponent(ticker)+'&interval='+iv+'&theme=dark&style=1&timezone=America%2FNew_York&withdateranges=1&hideideas=1&locale=en'+studiesParam
+
+  return(<div>
+    <div className='flex items-center gap-3 mb-3 flex-wrap'>
+      <h2 className='text-white font-bold text-lg'>Chart</h2>
+      <div className='flex gap-1 flex-wrap'>{IVS.map(i=><button key={i.v} onClick={()=>setIv(i.v)} className={'px-3 py-1 rounded text-xs font-medium '+(iv===i.v?'bg-blue-600 text-white':'bg-[#1e2530] text-gray-400 hover:text-white')}>{i.l}</button>)}</div>
+      <div className='flex gap-2 ml-auto'>
+        <input className='w-28 bg-[#1e2530] border border-[#2d3748] rounded px-3 py-1.5 text-white text-sm font-mono uppercase outline-none' value={input} onChange={e=>setInput(e.target.value.toUpperCase())} onKeyDown={e=>e.key==='Enter'&&onTicker(input)} placeholder='Ticker'/>
+        <button onClick={()=>onTicker(input)} className='px-4 py-1.5 bg-[#1e2530] text-white rounded text-sm hover:bg-[#2d3748]'>Go</button>
+      </div>
+    </div>
+    <div className='flex gap-2 flex-wrap mb-3'>
+      <span className='text-gray-500 text-xs self-center'>Indicators:</span>
+      {INDICATORS.map(ind=>(
+        <button key={ind.label} onClick={()=>toggleInd(ind.study)}
+          className={'px-2.5 py-1 rounded text-xs font-medium transition-colors '+(activeInds.includes(ind.study)?'ind-on':'ind-off')}>
+          {ind.label}
+        </button>
+      ))}
+      {activeInds.length>0&&<button onClick={()=>setActiveInds([])} className='px-2.5 py-1 rounded text-xs text-gray-500 hover:text-white border border-[#1e2530]'>Clear all</button>}
+    </div>
+    <p className='text-gray-600 text-xs mb-2'>Tip: Log into TradingView.com in this browser to access your saved indicators and layouts.</p>
+    <div className='bg-[#141820] border border-[#1e2530] rounded-lg overflow-hidden' style={{height:580}}>
+      <iframe key={src} src={src} style={{width:'100%',height:'100%',border:'none'}} allowFullScreen title='Chart'/>
+    </div>
+  </div>)
+}
+
+// ── News Feed tab ──
+function NewsCard({item,onTicker}){
+  const isReddit=item.type==='reddit'
+  return(
+    <div className='bg-[#141820] border border-[#1e2530] rounded-lg p-4 hover:border-[#2d3748] transition-colors'>
+      <div className='flex items-start justify-between gap-3'>
+        <div className='flex-1 min-w-0'>
+          <div className='flex items-center gap-2 mb-1.5'>
+            <button onClick={()=>onTicker(item.ticker)} className='text-xs font-mono font-bold text-blue-400 hover:text-white bg-[#0b0e11] px-1.5 py-0.5 rounded'>{item.ticker}</button>
+            {isReddit
+              ?<span className='text-xs text-orange-400'>r/{item.subreddit}</span>
+              :<span className='text-xs text-gray-500'>{item.source}</span>
+            }
+            <span className='text-xs text-gray-600 ml-auto shrink-0'>{timeAgo(item.time)}</span>
+          </div>
+          <a href={item.url} target='_blank' rel='noreferrer' className='text-sm text-gray-200 hover:text-white leading-snug line-clamp-2'>{item.title}</a>
+          {isReddit&&item.text&&<p className='text-xs text-gray-500 mt-1 line-clamp-2'>{item.text}</p>}
+          {isReddit&&<div className='flex gap-3 mt-1.5 text-xs text-gray-600'><span>▲ {item.score}</span><span>💬 {item.comments}</span></div>}
+        </div>
+        {item.thumbnail&&<img src={item.thumbnail} alt='' className='w-16 h-12 object-cover rounded shrink-0' onError={e=>e.target.style.display='none'}/>}
+      </div>
+    </div>
+  )
+}
+
+function NewsFeed({onTicker}){
+  const [watchlist,setWatchlist]=useState(()=>{try{return JSON.parse(localStorage.getItem('watchlist')||'["AAPL","NVDA","TSLA","META"]')}catch{return['AAPL','NVDA','TSLA','META']}})
+  const [feed,setFeed]=useState([])
+  const [loading,setLoading]=useState(false)
+  const [newTicker,setNewTicker]=useState('')
+  const [filter,setFilter]=useState('all')
+  const [ts,setTs]=useState(null)
+
+  useEffect(()=>{localStorage.setItem('watchlist',JSON.stringify(watchlist))},[watchlist])
+
+  function addTicker(){
+    const t=newTicker.trim().toUpperCase()
+    if(t&&!watchlist.includes(t)){setWatchlist(prev=>[...prev,t])}
+    setNewTicker('')
+  }
+  function removeTicker(t){setWatchlist(prev=>prev.filter(x=>x!==t))}
+
+  async function loadFeed(){
+    if(watchlist.length===0)return
+    setLoading(true)
+    try{
+      const newsPromises=watchlist.map(t=>axios.get('/api/news/'+t).then(r=>r.data).catch(()=>[]))
+      const redditPromise=axios.get('/api/reddit?tickers='+watchlist.join(',')).then(r=>r.data).catch(()=>[])
+      const [newsArrays,reddit]=await Promise.all([Promise.all(newsPromises),redditPromise])
+      const allNews=newsArrays.flat()
+      const combined=[...allNews,...reddit]
+      combined.sort((a,b)=>b.time-a.time)
+      setFeed(combined)
+      setTs(new Date().toLocaleTimeString())
+    }catch(e){console.error(e)}
+    finally{setLoading(false)}
+  }
+
+  useEffect(()=>{loadFeed()},[watchlist.join(',')])
+
+  const filtered=filter==='all'?feed:filter==='reddit'?feed.filter(f=>f.type==='reddit'):feed.filter(f=>f.type==='news')
+  const byTicker=filter!=='all'&&filter!=='reddit'&&filter!=='news'?feed.filter(f=>f.ticker===filter):filtered
+
+  return(<div>
+    <div className='flex items-center justify-between mb-4 flex-wrap gap-3'>
+      <div><h2 className='text-white font-bold text-lg'>News Feed</h2>{ts&&<span className='text-gray-500 text-xs'>Updated {ts}</span>}</div>
+      <button onClick={loadFeed} disabled={loading} className='px-4 py-1.5 bg-[#1e2530] text-white rounded text-sm hover:bg-[#2d3748] disabled:opacity-50'>{loading?'Loading...':'Refresh'}</button>
+    </div>
+
+    <div className='bg-[#141820] border border-[#1e2530] rounded-lg p-4 mb-4'>
+      <div className='text-gray-400 text-sm mb-2'>Watchlist — stocks you are covering</div>
+      <div className='flex flex-wrap gap-2 mb-3'>
+        {watchlist.map(t=>(
+          <div key={t} className='flex items-center gap-1 bg-[#0b0e11] border border-[#2d3748] rounded px-2 py-1'>
+            <button onClick={()=>onTicker(t)} className='text-xs font-mono text-blue-400 hover:text-white'>{t}</button>
+            <button onClick={()=>removeTicker(t)} className='text-gray-600 hover:text-red-400 text-xs ml-1'>✕</button>
+          </div>
+        ))}
+      </div>
+      <div className='flex gap-2'>
+        <input className='w-28 bg-[#0b0e11] border border-[#2d3748] rounded px-3 py-1.5 text-white text-sm font-mono uppercase outline-none' placeholder='Add ticker' value={newTicker} onChange={e=>setNewTicker(e.target.value.toUpperCase())} onKeyDown={e=>e.key==='Enter'&&addTicker()}/>
+        <button onClick={addTicker} disabled={!newTicker} className='px-3 py-1.5 bg-blue-600 text-white rounded text-sm hover:bg-blue-700 disabled:opacity-50'>Add</button>
+      </div>
+    </div>
+
+    <div className='flex gap-2 mb-4 flex-wrap'>
+      {['all','news','reddit',...watchlist].map(f=>(
+        <button key={f} onClick={()=>setFilter(f)} className={'px-3 py-1 rounded text-xs font-medium '+(filter===f?'bg-[#2d3748] text-white':'bg-[#141820] text-gray-500 hover:text-white border border-[#1e2530]')}>
+          {f==='all'?'All':f==='news'?'News Only':f==='reddit'?'Reddit Only':f}
+        </button>
+      ))}
+    </div>
+
+    {loading&&feed.length===0?<div className='text-center text-gray-500 py-20'><p>Loading news and Reddit posts...</p></div>
+      :byTicker.length===0?<div className='text-center text-gray-500 py-16'><p>No posts found</p></div>
+      :<div className='space-y-3'>{byTicker.map((item,i)=><NewsCard key={i} item={item} onTicker={t=>{onTicker(t)}}/>)}</div>
+    }
+  </div>)
+}
+
+// ── App ──
+const TABS=['Theme Board','Pre-Market Screener','Chart','News Feed']
+function App(){
+  const [tab,setTab]=useState('Theme Board')
+  const [chartTicker,setChartTicker]=useState('AAPL')
+  function openChart(t){setChartTicker(t);setTab('Chart')}
+  return(
+    <div className='min-h-screen'>
+      <div className='border-b border-[#1e2530] px-6 py-3 flex items-center gap-4 flex-wrap sticky top-0 bg-[#0b0e11] z-10'>
+        <span className='text-white font-bold text-lg'>📊 Stock Dashboard</span>
+        <div className='flex gap-1 flex-wrap'>
+          {TABS.map(t=>(
+            <button key={t} onClick={()=>setTab(t)} className={'px-4 py-1.5 rounded text-sm font-medium transition-colors '+(tab===t?'bg-[#1e2530] text-white':'text-gray-500 hover:text-white hover:bg-[#141820]')}>
+              {t}{t==='News Feed'&&<span className='ml-1.5 text-xs bg-orange-500 text-white px-1.5 py-0.5 rounded-full'>NEW</span>}
+            </button>
+          ))}
+        </div>
+        <div className='ml-auto text-gray-500 text-xs'>{new Date().toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric',year:'numeric'})}</div>
+      </div>
+      <div className='p-6'>
+        {tab==='Theme Board'&&<ThemeBoard onTicker={openChart}/>}
+        {tab==='Pre-Market Screener'&&<Screener onTicker={openChart}/>}
+        {tab==='Chart'&&<ChartPage ticker={chartTicker} onTicker={t=>{setChartTicker(t)}}/>}
+        {tab==='News Feed'&&<NewsFeed onTicker={openChart}/>}
+      </div>
+    </div>
+  )
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>)
+</script>
+</body>
+</html>

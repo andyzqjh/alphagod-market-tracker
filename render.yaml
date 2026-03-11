@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: alphagod-market-tracker
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    region: singapore
+    autoDeployTrigger: commit
+    healthCheckPath: /api/health
+    envVars:
+      - key: ANTHROPIC_API_KEY
+        sync: false

@@ -22,6 +22,7 @@ from data_fetcher import (
     get_theme_data,
 )
 from news_fetcher import get_reddit_posts, get_stock_news
+from stockbee_fetcher import get_stockbee_monitor
 
 app = FastAPI(title='Stock Dashboard')
 app.mount('/static', StaticFiles(directory=os.path.join(os.path.dirname(__file__), 'static')), name='static')
@@ -48,7 +49,10 @@ def _collect_market_headlines() -> List[dict]:
     headlines = []
     seen = set()
     for ticker in MARKET_BRIEF_TICKERS:
-        for item in get_stock_news(ticker)[:3]:
+        detail = get_stock_detail(ticker)
+        company_name = detail.get('company_name') or ticker
+        items = [item for item in get_stock_news(ticker, company_name=company_name) if item.get('verified')]
+        for item in items[:3]:
             key = item.get('url') or f"{ticker}:{item.get('title')}"
             if key in seen:
                 continue
@@ -151,7 +155,7 @@ def chart_workspace(ticker: str):
 
     snapshot = get_chart_snapshot(ticker)
     detail = snapshot.get('detail') or get_stock_detail(ticker)
-    headlines = get_stock_news(ticker)[:5]
+    headlines = get_stock_news(ticker, company_name=detail.get('company_name') or ticker)[:5]
     reasoning = analyze_chart_reasoning(ticker, detail, snapshot, headlines)
     payload = {
         'ticker': ticker,
@@ -216,8 +220,19 @@ def stock_news(ticker: str):
     cached = get_cached(key, ttl=300)
     if cached:
         return cached
-    data = get_stock_news(ticker)
+    detail = get_stock_detail(ticker)
+    data = get_stock_news(ticker, company_name=detail.get('company_name') or ticker)
     set_cache(key, data)
+    return data
+
+
+@app.get('/api/stockbee-monitor')
+def stockbee_monitor():
+    cached = get_cached('stockbee_monitor', ttl=600)
+    if cached:
+        return cached
+    data = get_stockbee_monitor()
+    set_cache('stockbee_monitor', data)
     return data
 
 

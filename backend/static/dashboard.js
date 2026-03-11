@@ -9,7 +9,7 @@
     '^RUT': 'RUSSELL:RUT',
     'BTC-USD': 'BITSTAMP:BTCUSD',
   };
-  const TAB_ORDER = ['overview', 'premarket', 'postmarket', 'themes', 'flows', 'rrg', 'earnings', 'chart'];
+  const TAB_ORDER = ['overview', 'premarket', 'postmarket', 'themes', 'flows', 'rrg', 'earnings', 'monitor', 'chart'];
   const TAB_LABELS = {
     overview: 'Overview',
     premarket: 'Pre-market',
@@ -18,6 +18,7 @@
     flows: 'ETF Flows',
     rrg: 'ETF RRG',
     earnings: 'Earnings',
+    monitor: 'Market Monitor',
     chart: 'Chart Desk',
   };
   const INTERVALS = [
@@ -67,6 +68,7 @@
     etfs: null,
     rrg: null,
     earnings: null,
+    monitor: null,
     chartWorkspace: null,
     loading: {
       overview: false,
@@ -77,6 +79,7 @@
       etfs: false,
       rrg: false,
       earnings: false,
+      monitor: false,
       chart: false,
     },
     errors: {},
@@ -129,6 +132,16 @@
     });
   }
 
+  function fmtDateTime(value) {
+    if (!value) return '--';
+    return new Date(value).toLocaleString('en-US', {
+      month: 'short',
+      day: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit',
+    });
+  }
+
   function deltaClass(value) {
     if (value == null || Number.isNaN(Number(value))) return 'warn';
     return Number(value) >= 0 ? 'pos' : 'neg';
@@ -139,6 +152,50 @@
     if (tone === 'bullish') return 'bullish';
     if (tone === 'bearish') return 'bearish';
     return 'neutral';
+  }
+
+  function monitorTone(key, row) {
+    const value = Number(row?.[key]);
+    if (!Number.isFinite(value)) return '';
+
+    if (key === 'ratio5' || key === 'ratio10') {
+      return value >= 1 ? 'pos' : value >= 0.85 ? 'warn' : 'neg';
+    }
+    if (key === 't2108') {
+      return value >= 60 ? 'pos' : value >= 40 ? 'warn' : 'neg';
+    }
+    if (key === 'up4') return (Number(row?.up4) || 0) >= (Number(row?.down4) || 0) ? 'pos' : 'neg';
+    if (key === 'down4') return (Number(row?.down4) || 0) <= (Number(row?.up4) || 0) ? 'pos' : 'neg';
+    if (key === 'up25_quarter') return (Number(row?.up25_quarter) || 0) >= (Number(row?.down25_quarter) || 0) ? 'pos' : 'neg';
+    if (key === 'down25_quarter') return (Number(row?.down25_quarter) || 0) <= (Number(row?.up25_quarter) || 0) ? 'pos' : 'neg';
+    if (key === 'up25_month') return (Number(row?.up25_month) || 0) >= (Number(row?.down25_month) || 0) ? 'pos' : 'neg';
+    if (key === 'down25_month') return (Number(row?.down25_month) || 0) <= (Number(row?.up25_month) || 0) ? 'pos' : 'neg';
+    if (key === 'up50_month') return (Number(row?.up50_month) || 0) >= (Number(row?.down50_month) || 0) ? 'pos' : 'neg';
+    if (key === 'down50_month') return (Number(row?.down50_month) || 0) <= (Number(row?.up50_month) || 0) ? 'pos' : 'neg';
+    if (key === 'up13_in_34') return (Number(row?.up13_in_34) || 0) >= (Number(row?.down13_in_34) || 0) ? 'pos' : 'neg';
+    if (key === 'down13_in_34') return (Number(row?.down13_in_34) || 0) <= (Number(row?.up13_in_34) || 0) ? 'pos' : 'neg';
+    return '';
+  }
+
+  function fmtMonitorCell(column, value) {
+    if (value == null || Number.isNaN(Number(value))) return 'n/a';
+    if (column.type === 'date') return esc(value);
+    if (column.type === 'number_2') return Number(value).toFixed(2);
+    if (column.type === 'percent') return `${Number(value).toFixed(2)}%`;
+    if (column.type === 'sp') return fmtPrice(value, false);
+    return Number(value).toLocaleString('en-US', { maximumFractionDigits: 0 });
+  }
+
+  function renderAnalysisBlocks(blocks) {
+    if (!Array.isArray(blocks) || !blocks.length) {
+      return '<div class="analysis-block"><div class="mini-label">Awaiting</div><div class="tiny-copy">No analysis blocks are available yet.</div></div>';
+    }
+    return blocks.slice(0, 3).map((block) => `
+      <div class="analysis-block">
+        <div class="mini-label">${esc(block.title || 'Analysis')}</div>
+        <div class="tiny-copy">${esc(block.body || 'n/a')}</div>
+      </div>
+    `).join('');
   }
 
   function chartSymbolFor(symbol) {
@@ -955,8 +1012,8 @@
     const label = kind === 'premarket' ? 'Pre-market' : 'Post-market';
     const summary = payload?.summary || {};
     const sourceCopy = summary.source_mode === 'daily_proxy'
-      ? `${label} feed fallback is active, so this board is being backfilled from strong daily movers plus news and perception context.`
-      : `Tracked names with a live ${label.toLowerCase()} move above the filter.`;
+      ? `${label} feed fallback is active, so the board is scanning strong daily movers and only elevating rows when a verified company-specific headline is present.`
+      : `This board prioritizes movers with a verified company-specific catalyst instead of generic tape commentary.`;
 
     const summaryHtml = state.loading[kind] && !payload
       ? emptyState(`Loading ${label.toLowerCase()} movers...`)
@@ -964,11 +1021,11 @@
         ? errorState(state.errors[kind])
         : `
           <div class="metrics-5">
-            <div class="metric-card"><div class="metric-label">Matched</div><div class="metric-value">${summary.matched_count ?? '--'}</div><div class="metric-copy">${esc(sourceCopy)}</div></div>
-            <div class="metric-card"><div class="metric-label">Up</div><div class="metric-value pos">${summary.leaders_count ?? '--'}</div><div class="metric-copy">Names trading green in the ${label.toLowerCase()} tape.</div></div>
-            <div class="metric-card"><div class="metric-label">Down</div><div class="metric-value neg">${summary.laggards_count ?? '--'}</div><div class="metric-copy">Names trading red in the ${label.toLowerCase()} tape.</div></div>
-            <div class="metric-card"><div class="metric-label">Biggest Up</div><div class="metric-value" style="font-size:1.25rem;">${esc(summary.biggest_up || '--')}</div><div class="metric-copy">Top upside mover returned by the live board.</div></div>
-            <div class="metric-card"><div class="metric-label">Biggest Down</div><div class="metric-value" style="font-size:1.25rem;">${esc(summary.biggest_down || '--')}</div><div class="metric-copy">Top downside mover returned by the live board.</div></div>
+            <div class="metric-card"><div class="metric-label">Candidates</div><div class="metric-value">${summary.candidate_count ?? summary.matched_count ?? '--'}</div><div class="metric-copy">${esc(sourceCopy)}</div></div>
+            <div class="metric-card"><div class="metric-label">Verified</div><div class="metric-value">${summary.verified_headline_count ?? '--'}</div><div class="metric-copy">Rows with a verified headline tied to the ticker, not a generic roundup.</div></div>
+            <div class="metric-card"><div class="metric-label">Rendered</div><div class="metric-value">${summary.rendered_count ?? rows.length ?? '--'}</div><div class="metric-copy">Current rows shown on the live catalyst board.</div></div>
+            <div class="metric-card"><div class="metric-label">Biggest Up</div><div class="metric-value" style="font-size:1.25rem;">${esc(summary.biggest_up || '--')}</div><div class="metric-copy">Top verified upside mover on the board.</div></div>
+            <div class="metric-card"><div class="metric-label">Biggest Down</div><div class="metric-value" style="font-size:1.25rem;">${esc(summary.biggest_down || '--')}</div><div class="metric-copy">Top verified downside mover on the board.</div></div>
           </div>
         `;
 
@@ -981,11 +1038,11 @@
             <thead>
               <tr>
                 <th>Ticker</th>
+                <th>Headline</th>
                 <th>${label} %</th>
                 <th>${label} Vol</th>
                 <th>${label} RVol</th>
                 <th>1D %</th>
-                <th>Source</th>
                 <th>Short Interest</th>
                 <th>Float</th>
                 <th>Industry</th>
@@ -999,21 +1056,24 @@
               ${rows.map((item) => `
                 <tr>
                   <td><button class="chip-btn clicker mono" data-open-desk="${esc(item.ticker)}">${esc(item.ticker)}</button></td>
+                  <td style="min-width:340px;">
+                    ${item.headline_url ? `<a class="headline-link" href="${esc(item.headline_url)}" target="_blank" rel="noreferrer">${esc(item.headline_title || 'No verified catalyst')}</a>` : `<div>${esc(item.headline_title || 'No verified catalyst')}</div>`}
+                    <div class="tiny-copy" style="margin-top:8px;">${esc(item.headline_label || item.headline_source || 'No verified catalyst')}</div>
+                  </td>
                   <td class="${deltaClass(item.session_pct)}">${fmtPercent(item.session_pct)}</td>
                   <td>${fmtVolume(item.session_volume)}</td>
                   <td>${item.session_rvol != null ? `${item.session_rvol.toFixed(2)}x` : 'n/a'}</td>
                   <td class="${deltaClass(item.change_pct)}">${fmtPercent(item.change_pct)}</td>
-                  <td><span class="soft-pill">${esc(item.session_source === 'daily_proxy' ? 'Daily Proxy' : item.session_source === 'quote' ? 'Quote' : 'Extended')}</span></td>
                   <td>${item.short_interest != null ? `${item.short_interest.toFixed(2)}%` : 'n/a'}</td>
                   <td>${item.float_shares != null ? fmtVolume(item.float_shares) : 'n/a'}</td>
                   <td>${esc(item.industry || item.company_name || item.ticker)}</td>
                   <td><span class="soft-pill">${esc(item.category || item.event_label || 'Narrative')}</span></td>
                   <td><span class="soft-pill ${item.grade === 'A' ? 'pos' : item.grade === 'D' ? 'neg' : 'warn'}">${esc(item.grade || 'C')}</span></td>
-                  <td style="min-width:360px; color: var(--muted);">${esc(item.reasoning || item.what_changed || 'n/a')}</td>
-                  <td style="min-width:320px; color: var(--muted);">
-                    <div>${esc(item.perception_before || 'n/a')}</div>
-                    <div style="margin-top:8px;">${esc(item.what_changed || 'n/a')}</div>
-                    <div style="margin-top:8px;">${esc(item.market_view || item.analyst_view || 'n/a')}</div>
+                  <td style="min-width:360px; color: var(--muted);">${esc(item.reasoning || 'n/a')}</td>
+                  <td style="min-width:360px;">
+                    <div class="analysis-stack">
+                      ${renderAnalysisBlocks(item.analysis_blocks)}
+                    </div>
                     <div style="margin-top:10px;"><button class="small-btn" data-open-desk="${esc(item.ticker)}">Open Chart Desk</button></div>
                   </td>
                 </tr>
@@ -1046,6 +1106,88 @@
             </div>
           </div>
           ${boardHtml}
+        </section>
+      </div>
+    `;
+  }
+
+  function renderMonitorTab() {
+    const monitor = state.monitor;
+    const summary = monitor?.summary || {};
+    const rows = monitor?.rows || [];
+    const columns = monitor?.columns || [];
+
+    const summaryHtml = state.loading.monitor && !monitor
+      ? emptyState('Loading Stockbee market monitor...')
+      : state.errors.monitor
+        ? errorState(state.errors.monitor)
+        : `
+          <div class="metrics-5">
+            <div class="metric-card"><div class="metric-label">Latest Date</div><div class="metric-value" style="font-size:1.25rem;">${esc(summary.latest_date || '--')}</div><div class="metric-copy">Most recent published breadth snapshot from the live sheet.</div></div>
+            <div class="metric-card"><div class="metric-label">Up 4%+</div><div class="metric-value ${monitorTone('up4', summary)}">${summary.up4 != null ? Number(summary.up4).toLocaleString('en-US', { maximumFractionDigits: 0 }) : '--'}</div><div class="metric-copy">Stocks gaining at least 4% today.</div></div>
+            <div class="metric-card"><div class="metric-label">Down 4%+</div><div class="metric-value ${monitorTone('down4', summary)}">${summary.down4 != null ? Number(summary.down4).toLocaleString('en-US', { maximumFractionDigits: 0 }) : '--'}</div><div class="metric-copy">Stocks dropping at least 4% today.</div></div>
+            <div class="metric-card"><div class="metric-label">5d Ratio</div><div class="metric-value ${monitorTone('ratio5', summary)}">${summary.ratio5 != null ? Number(summary.ratio5).toFixed(2) : '--'}</div><div class="metric-copy">Primary short-term breadth ratio from the monitor.</div></div>
+            <div class="metric-card"><div class="metric-label">T2108</div><div class="metric-value ${monitorTone('t2108', summary)}">${summary.t2108 != null ? `${Number(summary.t2108).toFixed(2)}%` : '--'}</div><div class="metric-copy">Percent of stocks above the 40-day moving average.</div></div>
+          </div>
+        `;
+
+    const linkHtml = monitor
+      ? `
+        <div class="pills">
+          <a class="soft-pill headline-link" href="${esc(monitor.source_url || '#')}" target="_blank" rel="noreferrer">Stockbee Source</a>
+          <a class="soft-pill headline-link" href="${esc(monitor.sheet_url || '#')}" target="_blank" rel="noreferrer">Published Sheet</a>
+          ${(monitor.guides || []).map((guide) => `<a class="soft-pill headline-link" href="${esc(guide.url || '#')}" target="_blank" rel="noreferrer">${esc(guide.label || 'Guide')}</a>`).join('')}
+        </div>
+      `
+      : '';
+
+    const tableHtml = rows.length
+      ? `
+        <div class="table-wrap monitor-table-wrap">
+          <table class="monitor-table">
+            <thead>
+              <tr>
+                ${columns.map((column) => `<th>${esc(column.short_label || column.shortLabel || column.key)}</th>`).join('')}
+              </tr>
+            </thead>
+            <tbody>
+              ${rows.map((row) => `
+                <tr>
+                  ${columns.map((column) => `
+                    <td class="monitor-cell ${monitorTone(column.key, row)}">${fmtMonitorCell(column, row[column.key])}</td>
+                  `).join('')}
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        </div>
+      `
+      : emptyState('No Stockbee rows were returned from the published sheet yet.');
+
+    return `
+      <div class="main-stack">
+        <section class="panel section">
+          <div class="section-head">
+            <div>
+              <div class="section-kicker">Breadth Timing</div>
+              <h2>Stockbee Market Monitor</h2>
+              <p>${esc(monitor?.description || 'Stockbee Market Monitor is a breadth-based market timing tracker. This tab pulls the live published sheet into the dashboard.')}</p>
+            </div>
+            <button class="action-btn" data-refresh="monitor">Refresh Monitor</button>
+          </div>
+          ${summaryHtml}
+          ${linkHtml}
+        </section>
+        <section class="panel section">
+          <div class="section-head">
+            <div>
+              <div class="section-kicker">Monitor Table</div>
+              <h2>Live breadth sheet</h2>
+              <p>Heat-colored cells make it easier to read expansion, contraction, and participation directly from the latest Stockbee history.</p>
+            </div>
+            <span class="soft-pill warn">Updated ${fmtDateTime(monitor?.updated_at)}</span>
+          </div>
+          ${state.loading.monitor && !monitor ? emptyState('Loading breadth table...') : state.errors.monitor ? errorState(state.errors.monitor) : tableHtml}
         </section>
       </div>
     `;
@@ -1288,6 +1430,7 @@
     if (state.activeTab === 'flows') return renderFlowsTab();
     if (state.activeTab === 'rrg') return renderRrgTab();
     if (state.activeTab === 'earnings') return renderEarningsTab();
+    if (state.activeTab === 'monitor') return renderMonitorTab();
     if (state.activeTab === 'chart') return renderChartTab();
     return renderOverviewTab();
   }
@@ -1435,6 +1578,21 @@
       render();
     }
   }
+  async function loadMonitor(force = false) {
+    if (state.loading.monitor && !force) return;
+    state.loading.monitor = true;
+    state.errors.monitor = '';
+    render();
+    try {
+      state.monitor = await api('/api/stockbee-monitor');
+    } catch (error) {
+      console.error(error);
+      state.errors.monitor = 'Unable to load the Stockbee market monitor right now.';
+    } finally {
+      state.loading.monitor = false;
+      render();
+    }
+  }
   async function loadChartWorkspace(symbol, force = false) {
     const clean = String(symbol || state.chartSymbol || '').trim().toUpperCase();
     if (!clean) return;
@@ -1463,6 +1621,7 @@
       render();
       if (state.activeTab === 'premarket' && !state.premarket) loadPremarket();
       if (state.activeTab === 'postmarket' && !state.postmarket) loadPostmarket();
+      if (state.activeTab === 'monitor' && !state.monitor) loadMonitor();
       if (state.activeTab === 'chart' && !state.chartWorkspace) loadChartWorkspace(state.chartSymbol);
       if (state.activeTab === 'earnings' && !state.earnings) loadEarnings();
       return;
@@ -1478,6 +1637,7 @@
       if (target === 'flows') loadEtfs(true);
       if (target === 'rrg') loadRrg(true);
       if (target === 'earnings') loadEarnings(true);
+      if (target === 'monitor') loadMonitor(true);
       return;
     }
 
@@ -1551,6 +1711,7 @@
     window.setInterval(() => loadEtfs(true), AUTO_REFRESH_MS);
     window.setInterval(() => loadRrg(true), AUTO_REFRESH_MS);
     window.setInterval(() => { if (state.earnings) loadEarnings(true); }, AUTO_REFRESH_MS);
+    window.setInterval(() => { if (state.monitor) loadMonitor(true); }, AUTO_REFRESH_MS);
     window.setInterval(() => loadBrief(true), AUTO_REFRESH_MS);
   }
 

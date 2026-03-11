@@ -821,6 +821,25 @@ def get_etf_rrg_data() -> dict:
 def _coerce_timestamp(value) -> Optional[datetime]:
     if value is None:
         return None
+
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return None
+        if stripped.isdigit():
+            value = int(stripped)
+
+    if isinstance(value, (int, float)):
+        numeric = float(value)
+        if numeric <= 0:
+            return None
+        if numeric > 1_000_000_000_000:
+            numeric = numeric / 1000
+        try:
+            return datetime.fromtimestamp(numeric, tz=timezone.utc)
+        except (OSError, OverflowError, ValueError):
+            return None
+
     try:
         timestamp = pd.Timestamp(value)
     except Exception:
@@ -836,25 +855,102 @@ def _extract_calendar_dates(raw_value) -> List[datetime]:
     if raw_value is None:
         return []
 
-    values = raw_value if isinstance(raw_value, (list, tuple, set)) else [raw_value]
+    if isinstance(raw_value, pd.DataFrame):
+        values = raw_value.values.flatten().tolist()
+    elif isinstance(raw_value, pd.Series):
+        values = raw_value.tolist()
+    elif isinstance(raw_value, (list, tuple, set)):
+        values = list(raw_value)
+    else:
+        values = [raw_value]
+
     dates = []
+    seen = set()
     for value in values:
         timestamp = _coerce_timestamp(value)
         if timestamp:
-            dates.append(timestamp)
+            key = timestamp.isoformat()
+            if key not in seen:
+                seen.add(key)
+                dates.append(timestamp)
+    dates.sort()
     return dates
 
 
-def _fetch_single_earnings_event(ticker: str, start_dt: datetime, end_dt: datetime) -> Optional[dict]:
+def _extract_info_earnings_dates(info: dict) -> List[datetime]:
+    dates = []
+    seen = set()
+    for key in ('earningsTimestamp', 'earningsTimestampStart', 'earningsTimestampEnd'):
+        timestamp = _coerce_timestamp((info or {}).get(key))
+        if timestamp:
+            iso = timestamp.isoformat()
+            if iso not in seen:
+                seen.add(iso)
+                dates.append(timestamp)
+    dates.sort()
+    return dates
+
+
+def _earnings_source_label(source: str) -> str:
+    return {
+        'earnings_dates': 'Yahoo earnings dates',
+        'calendar': 'Yahoo calendar',
+        'info_timestamp': 'Yahoo profile timestamps',
+    }.get(source, 'Yahoo earnings feed')
+
+
+def _earnings_source_rank(source: str) -> int:
+    return {
+        'earnings_dates': 0,
+        'calendar': 1,
+        'info_timestamp': 2,
+    }.get(source, 9)
+
+
+def _make_earnings_candidate(
+    ticker: str,
+    earnings_dt: datetime,
+    source: str,
+    eps_estimate=None,
+    reported_eps=None,
+    surprise_pct=None,
+) -> dict:
+    return {
+        'ticker': ticker,
+        'earnings_date': earnings_dt,
+        'eps_estimate': _round_number(eps_estimate),
+        'reported_eps': _round_number(reported_eps),
+        'surprise_pct': _round_number(surprise_pct),
+        'event_source': source,
+        'event_source_label': _earnings_source_label(source),
+    }
+
+
+def _pick_earnings_candidate(candidates: List[dict], now_dt: datetime) -> Optional[dict]:
+    if not candidates:
+        return None
+    return sorted(
+        candidates,
+        key=lambda item: (
+            abs((item['earnings_date'] - now_dt).total_seconds()),
+            _earnings_source_rank(item.get('event_source')),
+            item['earnings_date'],
+        ),
+    )[0]
+
+
+def _fetch_single_earnings_event(ticker: str, start_dt: datetime, end_dt: datetime, now_dt: datetime) -> Optional[dict]:
     try:
         stock = yf.Ticker(ticker)
     except Exception:
         return None
 
+    candidates = []
+
     getter = getattr(stock, 'get_earnings_dates', None)
     if callable(getter):
         try:
-            frame = getter(limit=12)
+            frame = getter(limit=16)
             if isinstance(frame, pd.DataFrame) and not frame.empty:
                 working = frame.reset_index()
                 date_column = working.columns[0]
@@ -862,13 +958,14 @@ def _fetch_single_earnings_event(ticker: str, start_dt: datetime, end_dt: dateti
                     earnings_dt = _coerce_timestamp(row.get(date_column))
                     if not earnings_dt or earnings_dt < start_dt or earnings_dt > end_dt:
                         continue
-                    return {
-                        'ticker': ticker,
-                        'earnings_date': earnings_dt,
-                        'eps_estimate': _round_number(row.get('EPS Estimate')),
-                        'reported_eps': _round_number(row.get('Reported EPS')),
-                        'surprise_pct': _round_number(row.get('Surprise(%)')),
-                    }
+                    candidates.append(_make_earnings_candidate(
+                        ticker,
+                        earnings_dt,
+                        'earnings_dates',
+                        eps_estimate=row.get('EPS Estimate'),
+                        reported_eps=row.get('Reported EPS'),
+                        surprise_pct=row.get('Surprise(%)'),
+                    ))
         except Exception:
             pass
 
@@ -882,32 +979,76 @@ def _fetch_single_earnings_event(ticker: str, start_dt: datetime, end_dt: dateti
         raw_dates = calendar.get('Earnings Date') or calendar.get('Earnings Date*')
     elif isinstance(calendar, pd.DataFrame):
         if 'Earnings Date' in calendar.columns:
-            raw_dates = calendar['Earnings Date'].tolist()
+            raw_dates = calendar['Earnings Date']
         elif 'Earnings Date' in calendar.index:
-            raw_dates = calendar.loc['Earnings Date'].tolist()
+            raw_dates = calendar.loc['Earnings Date']
 
     for earnings_dt in _extract_calendar_dates(raw_dates):
         if start_dt <= earnings_dt <= end_dt:
-            return {
-                'ticker': ticker,
-                'earnings_date': earnings_dt,
-                'eps_estimate': None,
-                'reported_eps': None,
-                'surprise_pct': None,
-            }
+            candidates.append(_make_earnings_candidate(ticker, earnings_dt, 'calendar'))
 
-    return None
+    info = {}
+    try:
+        info = stock.info or {}
+    except Exception:
+        info = {}
+
+    for earnings_dt in _extract_info_earnings_dates(info):
+        if start_dt <= earnings_dt <= end_dt:
+            candidates.append(_make_earnings_candidate(ticker, earnings_dt, 'info_timestamp'))
+
+    return _pick_earnings_candidate(candidates, now_dt)
 
 
-def get_earnings_tracker(days_ahead: int = 14, limit: int = 120) -> dict:
-    start_dt = datetime.now(timezone.utc) - timedelta(hours=18)
-    end_dt = datetime.now(timezone.utc) + timedelta(days=max(days_ahead, 1))
+def _build_earnings_reasoning(event: dict, quote_data: dict, themes: List[str], now_dt: datetime) -> str:
+    earnings_dt = event.get('earnings_date')
+    surprise_pct = event.get('surprise_pct')
+    change_pct = quote_data.get('change_pct')
+    price = quote_data.get('price')
+    source_label = event.get('event_source_label') or 'Yahoo earnings feed'
+    theme_text = ', '.join(themes[:2]) if themes else 'the broader tape'
+
+    parts = []
+    if earnings_dt and earnings_dt.date() < now_dt.date():
+        if surprise_pct is not None:
+            if surprise_pct > 0:
+                parts.append(f'Recent results beat EPS by {surprise_pct:.2f}%, so traders are watching for post-earnings follow-through instead of a quick fade.')
+            elif surprise_pct < 0:
+                parts.append(f'Recent results missed EPS by {abs(surprise_pct):.2f}%, which keeps the focus on whether sellers still control the post-earnings tape.')
+            else:
+                parts.append('Recent results were close to expectations, so price reaction matters more than the raw print now.')
+        elif event.get('reported_eps') is not None:
+            parts.append(f'The report is already out with reported EPS at {event["reported_eps"]:.2f}, so traders are judging the market reaction rather than waiting for the catalyst.')
+        else:
+            parts.append('The earnings event recently hit the tape, so the main question is whether the market is accepting the result or still repricing it.')
+    else:
+        if event.get('eps_estimate') is not None:
+            parts.append(f'The next report is on deck with Street EPS estimate at {event["eps_estimate"]:.2f}, so traders will watch whether price is leaning into the print too early.')
+        else:
+            parts.append('An earnings date is coming up, so the key setup question is whether the stock is coiling for expansion or already extended into the event.')
+
+    if change_pct is not None and price is not None:
+        direction = 'up' if change_pct >= 0 else 'down'
+        parts.append(f'Shares are {direction} {abs(change_pct):.2f}% at about {price:.2f}, which gives a live read on how seriously the market is taking the setup.')
+
+    parts.append(f'This name also matters for {theme_text}, so a clean reaction can spill over into related peers.')
+    parts.append(f'Date source: {source_label}.')
+    return ' '.join(parts)
+
+
+def get_earnings_tracker(days_ahead: int = 21, limit: int = 120, lookback_days: int = 7) -> dict:
+    now_utc = datetime.now(timezone.utc)
+    start_dt = now_utc - timedelta(days=max(lookback_days, 1))
+    end_dt = now_utc + timedelta(days=max(days_ahead, 1))
 
     tracked_universe = list(dict.fromkeys(STOCK_UNIVERSE + [ticker for tickers in THEMES.values() for ticker in tickers]))
     events = []
 
     with ThreadPoolExecutor(max_workers=min(len(tracked_universe), 10)) as executor:
-        futures = {executor.submit(_fetch_single_earnings_event, ticker, start_dt, end_dt): ticker for ticker in tracked_universe}
+        futures = {
+            executor.submit(_fetch_single_earnings_event, ticker, start_dt, end_dt, now_utc): ticker
+            for ticker in tracked_universe
+        }
         for future in as_completed(futures):
             try:
                 event = future.result()
@@ -922,19 +1063,20 @@ def get_earnings_tracker(days_ahead: int = 14, limit: int = 120) -> dict:
     quotes = _batch_fetch_quotes([item['ticker'] for item in events])
 
     items = []
-    now_utc = datetime.now(timezone.utc)
     for event in events:
         ticker = event['ticker']
         quote_data = quotes.get(ticker, {})
         earnings_dt = event['earnings_date']
         days_until = (earnings_dt.date() - now_utc.date()).days
+        themes = THEME_LOOKUP.get(ticker, [])
+        status = 'Today' if days_until == 0 else ('Upcoming' if days_until > 0 else 'Recent')
         items.append({
             'ticker': ticker,
             'company_name': quote_data.get('long_name') or ticker,
             'earnings_date': earnings_dt.isoformat(),
             'earnings_date_display': earnings_dt.strftime('%a, %b %d %Y %I:%M %p UTC'),
             'days_until': days_until,
-            'status': 'Today' if days_until == 0 else ('Upcoming' if days_until > 0 else 'Recent'),
+            'status': status,
             'eps_estimate': event.get('eps_estimate'),
             'reported_eps': event.get('reported_eps'),
             'surprise_pct': event.get('surprise_pct'),
@@ -944,8 +1086,11 @@ def get_earnings_tracker(days_ahead: int = 14, limit: int = 120) -> dict:
             'avg_volume': quote_data.get('average_volume'),
             'rvol': round((quote_data.get('volume') or 0) / (quote_data.get('average_volume') or 1), 2) if quote_data.get('average_volume') else None,
             'market_cap': quote_data.get('market_cap'),
-            'themes': THEME_LOOKUP.get(ticker, []),
+            'themes': themes,
             'quote_status': 'available' if quote_data else 'unavailable',
+            'event_source': event.get('event_source'),
+            'event_source_label': event.get('event_source_label'),
+            'reasoning': _build_earnings_reasoning(event, quote_data, themes, now_utc),
         })
 
     theme_counts = {}
@@ -958,7 +1103,9 @@ def get_earnings_tracker(days_ahead: int = 14, limit: int = 120) -> dict:
         'updated_at': datetime.now(timezone.utc).isoformat(),
         'summary': {
             'coverage_universe': len(tracked_universe),
-            'upcoming_count': len(items),
+            'total_events': len(items),
+            'recent_count': sum(1 for item in items if item['days_until'] < 0),
+            'upcoming_count': sum(1 for item in items if item['days_until'] >= 0),
             'today_count': sum(1 for item in items if item['days_until'] == 0),
             'next_7_days': sum(1 for item in items if 0 <= item['days_until'] <= 7),
             'with_live_quotes': sum(1 for item in items if item.get('price') is not None),

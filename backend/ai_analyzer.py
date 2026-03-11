@@ -40,6 +40,17 @@ def _call_json(prompt: str, fallback: dict, max_tokens: int = 900) -> dict:
         return fallback
 
 
+def _merge_with_fallback(fallback: dict, candidate: dict) -> dict:
+    merged = dict(fallback)
+    if not isinstance(candidate, dict):
+        return merged
+    for key, value in candidate.items():
+        if value in (None, '', []):
+            continue
+        merged[key] = value
+    return merged
+
+
 def _join_moves(items: List[dict], label_key: str, value_key: str, limit: int = 3) -> str:
     formatted = []
     for item in items[:limit]:
@@ -57,6 +68,79 @@ def _join_headlines(items: List[dict], limit: int = 3) -> str:
         source = item.get('source') or item.get('ticker') or 'news feed'
         formatted.append(f'{title} ({source})')
     return '; '.join(formatted) or 'No fresh headline feed was available.'
+
+
+def _headline_text(item: dict) -> str:
+    title = item.get('title') or ''
+    summary = item.get('summary') or ''
+    return f'{title} {summary}'.strip().lower()
+
+
+def _headline_tone(item: dict) -> str:
+    text = _headline_text(item)
+    bullish_terms = [
+        'beat', 'beats', 'guidance raise', 'raised guidance', 'guidance hike', 'upgrade',
+        'contract', 'award', 'approval', 'partnership', 'deal', 'record', 'strong demand',
+        'backlog', 'buyback', 'launch', 'expansion', 'orders', 'surge', 'growth'
+    ]
+    bearish_terms = [
+        'miss', 'misses', 'guidance cut', 'cut guidance', 'downgrade', 'lawsuit', 'probe',
+        'investigation', 'offering', 'dilution', 'delay', 'weak demand', 'recall', 'tariff',
+        'restriction', 'cut', 'layoff', 'bankruptcy', 'fraud', 'warning'
+    ]
+
+    bullish_hits = sum(1 for term in bullish_terms if term in text)
+    bearish_hits = sum(1 for term in bearish_terms if term in text)
+    if bullish_hits > bearish_hits:
+        return 'Bullish'
+    if bearish_hits > bullish_hits:
+        return 'Bearish'
+    return 'Neutral'
+
+
+def _headline_impact(item: dict, trend_state: str) -> str:
+    text = _headline_text(item)
+    tone = _headline_tone(item)
+    trend = (trend_state or 'range-bound').lower()
+
+    if any(term in text for term in ['beat', 'miss', 'guidance', 'earnings', 'revenue', 'eps']):
+        if tone == 'Bullish':
+            return 'This reads like an earnings or guidance confirmation catalyst, so traders will look for the chart to hold strength instead of fading back into the prior range.'
+        if tone == 'Bearish':
+            return 'This reads like an earnings or guidance problem, so any bounce is vulnerable unless price quickly reclaims broken support with volume.'
+        return 'This is earnings-related news, so the next clue is whether the market treats it as already priced in or a fresh reset for expectations.'
+
+    if any(term in text for term in ['contract', 'award', 'deal', 'partnership', 'approval', 'launch', 'backlog', 'orders']):
+        if tone == 'Bullish':
+            return 'This headline matters because it can refresh the growth narrative and keep momentum traders involved if the breakout levels keep holding.'
+        if tone == 'Bearish':
+            return 'This headline matters because it introduces execution risk into the growth narrative, which can turn prior support into supply.'
+
+    if any(term in text for term in ['tariff', 'restriction', 'probe', 'investigation', 'lawsuit', 'recall', 'delay']):
+        return 'This is the kind of headline that can cap multiple expansion and keep traders defensive until price proves it can absorb the bad news.'
+
+    if tone == 'Bullish':
+        return f'The feed is supportive, so the main tell is whether the current {trend} keeps expanding with volume instead of stalling at obvious resistance.'
+    if tone == 'Bearish':
+        return f'The feed is a headwind, so the main tell is whether the current {trend} loses support and turns into distribution.'
+    return 'The feed is mixed, so price reaction matters more than the headline itself. Traders will watch whether the tape confirms the story with follow-through.'
+
+
+def _build_headline_impacts(headlines: List[dict], trend_state: str) -> List[dict]:
+    impacts = []
+    for item in headlines[:3]:
+        title = item.get('title') or 'Headline unavailable'
+        source = item.get('source') or item.get('ticker') or 'News feed'
+        summary = (item.get('summary') or '').strip()
+        tone = _headline_tone(item)
+        impacts.append({
+            'headline': title,
+            'source': source,
+            'tone': tone,
+            'summary': summary[:220] if summary else f'{source} is the source of the latest catalyst tied to {title.lower()}.',
+            'impact': _headline_impact(item, trend_state),
+        })
+    return impacts
 
 
 def analyze_stock(ticker: str, data: dict, news: str = None) -> dict:
@@ -122,7 +206,8 @@ Category options: Earnings | New Contracts Partnerships | FDA | Themes Narrative
 
 Return ONLY the JSON, no markdown, no extra text."""
 
-    return _call_json(prompt, fallback, max_tokens=700)
+    result = _call_json(prompt, fallback, max_tokens=700)
+    return _merge_with_fallback(fallback, result)
 
 
 def _fallback_market_brief(market_overview: dict, theme_dashboard: dict, etf_dashboard: dict, headlines: List[dict]) -> dict:
@@ -217,7 +302,8 @@ Rules:
 - Do not use markdown.
 - Return JSON only."""
 
-    return _call_json(prompt, fallback, max_tokens=1200)
+    result = _call_json(prompt, fallback, max_tokens=1200)
+    return _merge_with_fallback(fallback, result)
 
 
 def _fallback_chart_reasoning(ticker: str, detail: dict, snapshot: dict, headlines: List[dict]) -> dict:
@@ -240,6 +326,8 @@ def _fallback_chart_reasoning(ticker: str, detail: dict, snapshot: dict, headlin
 
     ret_text = f'{ret_1m:+.2f}%' if ret_1m is not None else 'n/a'
     rel_vol_text = f'{rel_vol}x' if rel_vol is not None else 'n/a'
+    headline_impacts = _build_headline_impacts(headlines, trend_state)
+    lead_impact = headline_impacts[0]['impact'] if headline_impacts else f'The feed is quiet, so traders will lean more heavily on the current {trend_state.lower()} and the nearest chart levels.'
 
     return {
         'bias': bias,
@@ -249,8 +337,9 @@ def _fallback_chart_reasoning(ticker: str, detail: dict, snapshot: dict, headlin
         'levels': f"The immediate reference zone is the recent 20-day range between {low20 if low20 is not None else 'n/a'} and {high20 if high20 is not None else 'n/a'}. A clean move through that band would change the chart character faster than any single headline.",
         'volume': f"Relative volume is running at {rel_vol_text} versus the 20-day average. That tells you whether the move has real sponsorship or is still vulnerable to fading back into the range.",
         'news_summary': f"Latest headlines: {news_rollup}",
-        'news_reasoning': f"If traders keep leaning on the current news flow, the tape can either confirm the existing {trend_state.lower()} or fade quickly if the headline impulse does not convert into volume-backed follow-through. The key catalyst in the feed right now is: {top_headline}",
+        'news_reasoning': lead_impact,
         'risk': f"RSI is {rsi if rsi is not None else 'n/a'}, so watch for exhaustion if momentum is already stretched. The latest headline context is: {top_headline}",
+        'headline_impacts': headline_impacts,
     }
 
 
@@ -279,7 +368,11 @@ Return ONLY valid JSON with this exact structure:
   "volume": "2-3 sentences on volume/participation",
   "news_summary": "1-2 sentences summarizing the latest news feed",
   "news_reasoning": "2-3 sentences connecting the news flow to the chart behavior",
-  "risk": "1-2 sentences on what can go wrong"
+  "risk": "1-2 sentences on what can go wrong",
+  "headline_impacts": [
+    {{"headline": "headline title", "tone": "Bullish", "summary": "one sentence recap", "impact": "1-2 sentence why it matters for the chart now"}},
+    {{"headline": "headline title", "tone": "Bearish", "summary": "one sentence recap", "impact": "1-2 sentence why it matters for the chart now"}}
+  ]
 }}
 
 Rules:
@@ -287,13 +380,14 @@ Rules:
 - Explain what is happening, not just indicators in isolation.
 - Mention whether the chart looks like breakout, pullback, base, or breakdown behavior.
 - Explicitly explain what the latest news suggests for price action.
+- Use the headline_impacts array to explain the latest news one headline at a time.
 - Return JSON only."""
 
-    return _call_json(prompt, fallback, max_tokens=900)
-
-
-
-
+    result = _call_json(prompt, fallback, max_tokens=1100)
+    merged = _merge_with_fallback(fallback, result)
+    if not isinstance(merged.get('headline_impacts'), list) or not merged.get('headline_impacts'):
+        merged['headline_impacts'] = fallback.get('headline_impacts', [])
+    return merged
 
 
 def _fallback_earnings_brief(earnings_tracker: dict) -> dict:
@@ -310,9 +404,9 @@ def _fallback_earnings_brief(earnings_tracker: dict) -> dict:
     top_themes = sorted(theme_counts.items(), key=lambda pair: pair[1], reverse=True)[:5]
 
     return {
-        'headline': 'Upcoming U.S. earnings are clustering in the tracked liquid-stock universe.',
-        'summary': f"There are {summary.get('upcoming_count', 0)} earnings events on deck in the current tracker, with {summary.get('today_count', 0)} due today and {summary.get('next_7_days', 0)} scheduled over the next week. The nearest names on the calendar are {', '.join(item.get('ticker', 'n/a') for item in top_names) or 'not available yet'}.",
-        'focus': f"Traders should focus on where earnings are concentrated by theme and whether price is already leaning into the print. Current leaders into earnings are {_join_moves(strongest, 'ticker', 'change_pct', limit=4)}, while weaker setups include {_join_moves(weakest, 'ticker', 'change_pct', limit=4)}.",
+        'headline': 'Recent and upcoming U.S. earnings are clustering in the tracked liquid-stock universe.',
+        'summary': f"There are {summary.get('total_events', 0)} earnings events in the current tracker, with {summary.get('recent_count', 0)} recent prints, {summary.get('today_count', 0)} due today, and {summary.get('next_7_days', 0)} more scheduled over the next week. The nearest names on the calendar are {', '.join(item.get('ticker', 'n/a') for item in top_names) or 'not available yet'}.",
+        'focus': f"Traders should focus on where earnings are concentrated by theme and whether price is already leaning into the print. Current leaders around earnings are {_join_moves(strongest, 'ticker', 'change_pct', limit=4)}, while weaker setups include {_join_moves(weakest, 'ticker', 'change_pct', limit=4)}.",
         'themes': f"The earnings slate is most connected to these tracked themes: {', '.join(theme for theme, _ in top_themes) or 'no clear theme concentration yet'}. That matters because a strong report can spill into peers and ETFs tied to the same narrative.",
         'risk': 'The main risk is that crowded names are already pricing in good news, which raises the odds of post-print reversals even on decent numbers. Watch whether implied expectations look too high versus the current tape.'
     }
@@ -326,7 +420,7 @@ def build_earnings_brief(earnings_tracker: dict) -> dict:
 Earnings tracker summary:
 {json.dumps(earnings_tracker.get('summary', {}), ensure_ascii=False)}
 
-Upcoming earnings rows:
+Recent and upcoming earnings rows:
 {json.dumps(earnings_tracker.get('items', [])[:20], ensure_ascii=False)}
 
 Return ONLY valid JSON with this exact structure:
@@ -342,6 +436,8 @@ Rules:
 - Speak like a trader, not a textbook.
 - Focus on concentration, expectations, and where the biggest reactions may happen.
 - Mention when price action suggests names may already be leaning into the print.
+- Include both recent and upcoming earnings context if available.
 - Return JSON only."""
 
-    return _call_json(prompt, fallback, max_tokens=900)
+    result = _call_json(prompt, fallback, max_tokens=900)
+    return _merge_with_fallback(fallback, result)

@@ -164,7 +164,7 @@ def chart_workspace(ticker: str):
 
 
 @app.get('/api/earnings-tracker')
-def earnings_tracker(days_ahead: int = Query(default=14), limit: int = Query(default=120)):
+def earnings_tracker(days_ahead: int = Query(default=21), limit: int = Query(default=120)):
     key = f'earnings_tracker_{days_ahead}_{limit}'
     cached = get_cached(key, ttl=1800)
     if cached:

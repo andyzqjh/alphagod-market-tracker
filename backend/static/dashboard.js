@@ -480,7 +480,7 @@
             <div class="metric-card"><div class="metric-label">Total themes</div><div class="metric-value">${summary.total_themes ?? '--'}</div><div class="metric-copy">Configured theme baskets currently tracked.</div></div>
             <div class="metric-card"><div class="metric-label">Positive breadth</div><div class="metric-value pos">${summary.positive ?? '--'}</div><div class="metric-copy">Themes trading with a positive average move.</div></div>
             <div class="metric-card"><div class="metric-label">Negative breadth</div><div class="metric-value neg">${summary.negative ?? '--'}</div><div class="metric-copy">Themes losing ground on average.</div></div>
-            <div class="metric-card"><div class="metric-label">Best / Worst</div><div class="metric-value" style="font-size:1.35rem;">${esc(summary.best_theme || '--')}</div><div class="metric-copy">${esc(summary.worst_theme || '--')} · Updated ${fmtTime(state.themes?.updated_at)}</div></div>
+            <div class="metric-card"><div class="metric-label">Best / Worst</div><div class="metric-value" style="font-size:1.35rem;">${esc(summary.best_theme || '--')}</div><div class="metric-copy">${esc(summary.worst_theme || '--')} | Updated ${fmtTime(state.themes?.updated_at)}</div></div>
           </div>
         `;
 
@@ -865,6 +865,7 @@
     const earnings = state.earnings;
     const items = earnings?.items || [];
     const brief = earnings?.brief || {};
+    const coverage = earnings?.summary?.coverage_universe ?? '--';
 
     const summaryHtml = state.loading.earnings && !earnings
       ? emptyState('Loading earnings tracker...')
@@ -872,11 +873,11 @@
         ? errorState(state.errors.earnings)
         : `
           <div class="metrics-5">
-            <div class="metric-card"><div class="metric-label">Tracked names</div><div class="metric-value">${earnings?.summary?.coverage_universe ?? '--'}</div><div class="metric-copy">Liquid U.S. stocks covered by the earnings tracker.</div></div>
-            <div class="metric-card"><div class="metric-label">Upcoming</div><div class="metric-value">${earnings?.summary?.upcoming_count ?? '--'}</div><div class="metric-copy">Upcoming or very recent earnings events in range.</div></div>
+            <div class="metric-card"><div class="metric-label">Recent</div><div class="metric-value">${earnings?.summary?.recent_count ?? '--'}</div><div class="metric-copy">Results that landed in the recent lookback window.</div></div>
+            <div class="metric-card"><div class="metric-label">Upcoming</div><div class="metric-value">${earnings?.summary?.upcoming_count ?? '--'}</div><div class="metric-copy">Names with scheduled reports still ahead.</div></div>
             <div class="metric-card"><div class="metric-label">Today</div><div class="metric-value">${earnings?.summary?.today_count ?? '--'}</div><div class="metric-copy">Names scheduled to report today.</div></div>
-            <div class="metric-card"><div class="metric-label">Next 7 Days</div><div class="metric-value">${earnings?.summary?.next_7_days ?? '--'}</div><div class="metric-copy">Earnings events over the next trading week.</div></div>
-            <div class="metric-card"><div class="metric-label">Top Theme</div><div class="metric-value" style="font-size:1.2rem;">${esc(earnings?.summary?.top_theme || '--')}</div><div class="metric-copy">Most represented tracked theme in the slate.</div></div>
+            <div class="metric-card"><div class="metric-label">Next 7 Days</div><div class="metric-value">${earnings?.summary?.next_7_days ?? '--'}</div><div class="metric-copy">Reports due over the next trading week.</div></div>
+            <div class="metric-card"><div class="metric-label">Top Theme</div><div class="metric-value" style="font-size:1.2rem;">${esc(earnings?.summary?.top_theme || '--')}</div><div class="metric-copy">Most represented tracked theme in the current slate.</div></div>
           </div>
         `;
 
@@ -889,8 +890,8 @@
             <div class="desk-head">
               <div>
                 <div class="section-kicker">AI Earnings Brief</div>
-                <h2>${esc(brief.headline || 'Upcoming earnings brief')}</h2>
-                <p>AI read on where the current U.S. earnings slate is concentrated and where the biggest reactions may appear.</p>
+                <h2>${esc(brief.headline || 'Recent and upcoming earnings brief')}</h2>
+                <p>Watching ${coverage} liquid U.S. stocks for fresh prints, near-term reports, and the places where earnings can spill into themes.</p>
               </div>
               <span class="soft-pill warn">Updated ${fmtTime(earnings?.updated_at)}</span>
             </div>
@@ -910,13 +911,12 @@
                 <th>Company</th>
                 <th>Date</th>
                 <th>Status</th>
-                <th>Days</th>
                 <th>EPS Est</th>
                 <th>Reported</th>
                 <th>Surprise</th>
-                <th>Price</th>
                 <th>1D %</th>
                 <th>Themes</th>
+                <th>AI / Event Read</th>
                 <th></th>
               </tr>
             </thead>
@@ -925,15 +925,17 @@
                 <tr>
                   <td><button class="chip-btn clicker mono" data-open-desk="${esc(item.ticker)}">${esc(item.ticker)}</button></td>
                   <td>${esc(item.company_name || item.ticker)}</td>
-                  <td>${esc(item.earnings_date_display || 'n/a')}</td>
+                  <td>
+                    <div>${esc(item.earnings_date_display || 'n/a')}</div>
+                    <div class="tiny-copy">${esc(item.event_source_label || 'Yahoo earnings feed')}</div>
+                  </td>
                   <td><span class="soft-pill ${item.status === 'Today' ? 'warn' : item.status === 'Upcoming' ? 'pos' : ''}">${esc(item.status || 'Scheduled')}</span></td>
-                  <td>${item.days_until != null ? item.days_until : 'n/a'}</td>
                   <td>${item.eps_estimate != null ? item.eps_estimate.toFixed(2) : 'n/a'}</td>
                   <td>${item.reported_eps != null ? item.reported_eps.toFixed(2) : 'n/a'}</td>
                   <td class="${deltaClass(item.surprise_pct)}">${fmtPercent(item.surprise_pct)}</td>
-                  <td>${fmtPrice(item.price)}</td>
                   <td class="${deltaClass(item.change_pct)}">${fmtPercent(item.change_pct)}</td>
                   <td>${esc((item.themes || []).join(', ') || 'None')}</td>
+                  <td style="min-width:320px; color: var(--muted);">${esc(item.reasoning || 'n/a')}</td>
                   <td><button class="small-btn" data-open-desk="${esc(item.ticker)}">Chart Desk</button></td>
                 </tr>
               `).join('')}
@@ -941,7 +943,7 @@
           </table>
         </div>
       `
-      : emptyState('No earnings rows were returned for the selected range yet.');
+      : emptyState('No recent or upcoming earnings rows were returned yet. If the provider is late, try refresh again in a few minutes.');
 
     return `
       <div class="main-stack">
@@ -949,8 +951,8 @@
           <div class="section-head">
             <div>
               <div class="section-kicker">Earnings Tracker</div>
-              <h2>Upcoming U.S. earnings releases</h2>
-              <p>Watch the tracked liquid-stock universe for scheduled earnings events, then open any name in the chart desk to pair price action with news and AI context.</p>
+              <h2>Recent and upcoming U.S. earnings</h2>
+              <p>Watch the tracked liquid-stock universe for fresh prints and near-term report dates, then open any name in the chart desk to pair price action with news and AI context.</p>
             </div>
             <button class="action-btn" data-refresh="earnings">Refresh Earnings</button>
           </div>
@@ -962,7 +964,7 @@
             <div>
               <div class="section-kicker">Calendar</div>
               <h2>Earnings slate</h2>
-              <p>Sorted by the nearest report date in the tracked universe.</p>
+              <p>Sorted by the nearest earnings event returned inside the recent-plus-upcoming window.</p>
             </div>
           </div>
           ${tableHtml}
@@ -975,6 +977,7 @@
     const detail = workspace?.detail || {};
     const metrics = workspace?.snapshot?.metrics || {};
     const reasoning = workspace?.reasoning || {};
+    const headlineImpacts = Array.isArray(reasoning.headline_impacts) ? reasoning.headline_impacts : [];
 
     const statsHtml = workspace ? `
       <div class="chart-stats">
@@ -1011,8 +1014,24 @@
           </div>
         `).join('')}
         <div class="reason-card">
+          <div class="mini-label">AI News Breakdown</div>
+          <div class="headline-list">
+            ${headlineImpacts.length ? headlineImpacts.map((item) => `
+              <div class="headline-item">
+                <div style="display:flex;justify-content:space-between;gap:12px;align-items:flex-start;">
+                  <div style="font-weight:600;">${esc(item.headline || 'Headline')}</div>
+                  <div class="tone-pill ${sentimentClass(item.tone)}">${esc(item.tone || 'Neutral')}</div>
+                </div>
+                <div class="tiny-copy" style="margin-top:6px;">${esc(item.source || 'News feed')}</div>
+                <div style="margin-top:8px;color:var(--muted);">${esc(item.summary || 'No summary from feed.')}</div>
+                <div style="margin-top:10px;">${esc(item.impact || 'No impact read available.')}</div>
+              </div>
+            `).join('') : '<div class="headline-item">No headline-by-headline impact notes were returned.</div>'}
+          </div>
+        </div>
+        <div class="reason-card">
           <div class="mini-label">Company Context</div>
-          <div class="reason-copy">${esc(detail.company_name || state.chartSymbol)}${detail.sector ? ` · ${esc(detail.sector)}` : ''}${detail.themes?.length ? ` · Themes: ${esc(detail.themes.join(', '))}` : ''}</div>
+          <div class="reason-copy">${esc(detail.company_name || state.chartSymbol)}${detail.sector ? ` | ${esc(detail.sector)}` : ''}${detail.themes?.length ? ` | Themes: ${esc(detail.themes.join(', '))}` : ''}</div>
         </div>
         <div class="reason-card">
           <div class="mini-label">Recent Headlines</div>
@@ -1020,6 +1039,7 @@
             <a class="headline-item" href="${esc(item.url || '#')}" target="_blank" rel="noreferrer">
               <div style="font-weight:600;">${esc(item.title || 'Headline')}</div>
               <div class="tiny-copy">${esc(item.source || item.ticker || '')}</div>
+              <div style="margin-top:8px;color:var(--muted);">${esc(item.summary || 'No summary from feed.')}</div>
             </a>
           `).join('') || '<div class="headline-item">No recent headlines were returned.</div>'}</div>
         </div>
@@ -1033,7 +1053,7 @@
             <div>
               <div class="section-kicker">Chart Desk</div>
               <h2>TradingView chart plus AI reasoning</h2>
-              <p>Type any symbol, or click one anywhere in the dashboard, to load a chart and a side-by-side AI explanation of what the structure is doing.</p>
+              <p>Type any symbol, or click one anywhere in the dashboard, to load a chart and a side-by-side AI explanation of what the structure is doing and what the latest news likely means.</p>
             </div>
           </div>
           <div class="chart-controls">

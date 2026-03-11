@@ -317,7 +317,7 @@ def _batch_fetch_chart_quotes(symbols: List[str]) -> dict:
     return quote_map
 
 
-def _batch_fetch_quotes(symbols: List[str]) -> dict:
+def _batch_fetch_quotes(symbols: List[str], allow_fallbacks: bool = True) -> dict:
     unique_symbols = list(dict.fromkeys(symbols))
     quote_map = {}
 
@@ -332,6 +332,9 @@ def _batch_fetch_quotes(symbols: List[str]) -> dict:
             shaped = _shape_quote(raw)
             if shaped:
                 quote_map[shaped['symbol']] = shaped
+
+    if not allow_fallbacks:
+        return quote_map
 
     missing_symbols = [symbol for symbol in unique_symbols if symbol not in quote_map]
     if missing_symbols:
@@ -874,7 +877,7 @@ def _get_sp500_heatmap_rows(force_refresh: bool = False) -> List[dict]:
     if not constituents:
         return []
 
-    quotes = _batch_fetch_quotes([item['ticker'] for item in constituents])
+    quotes = _batch_fetch_quotes([item['ticker'] for item in constituents], allow_fallbacks=False)
     rows = [_sp500_row_from_quote(constituent, quotes.get(constituent['ticker']) or {}) for constituent in constituents]
     _SP500_HEATMAP_CACHE['rows'] = rows
     _SP500_HEATMAP_CACHE['expires_at'] = now + SP500_HEATMAP_CACHE_TTL

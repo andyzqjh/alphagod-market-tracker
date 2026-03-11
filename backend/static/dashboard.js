@@ -883,6 +883,9 @@
     const rows = payload?.all || [];
     const label = kind === 'premarket' ? 'Pre-market' : 'Post-market';
     const summary = payload?.summary || {};
+    const sourceCopy = summary.source_mode === 'daily_proxy'
+      ? `${label} feed fallback is active, so this board is being backfilled from strong daily movers plus news and perception context.`
+      : `Tracked names with a live ${label.toLowerCase()} move above the filter.`;
 
     const summaryHtml = state.loading[kind] && !payload
       ? emptyState(`Loading ${label.toLowerCase()} movers...`)
@@ -890,7 +893,7 @@
         ? errorState(state.errors[kind])
         : `
           <div class="metrics-5">
-            <div class="metric-card"><div class="metric-label">Matched</div><div class="metric-value">${summary.matched_count ?? '--'}</div><div class="metric-copy">Tracked names with a live ${label.toLowerCase()} move above the filter.</div></div>
+            <div class="metric-card"><div class="metric-label">Matched</div><div class="metric-value">${summary.matched_count ?? '--'}</div><div class="metric-copy">${esc(sourceCopy)}</div></div>
             <div class="metric-card"><div class="metric-label">Up</div><div class="metric-value pos">${summary.leaders_count ?? '--'}</div><div class="metric-copy">Names trading green in the ${label.toLowerCase()} tape.</div></div>
             <div class="metric-card"><div class="metric-label">Down</div><div class="metric-value neg">${summary.laggards_count ?? '--'}</div><div class="metric-copy">Names trading red in the ${label.toLowerCase()} tape.</div></div>
             <div class="metric-card"><div class="metric-label">Biggest Up</div><div class="metric-value" style="font-size:1.25rem;">${esc(summary.biggest_up || '--')}</div><div class="metric-copy">Top upside mover returned by the live board.</div></div>
@@ -898,7 +901,9 @@
           </div>
         `;
 
-    const boardHtml = rows.length
+    const boardHtml = state.loading[kind] && !payload
+      ? emptyState(`Loading ${label.toLowerCase()} board...`)
+      : rows.length
       ? `
         <div class="table-wrap">
           <table>
@@ -909,6 +914,7 @@
                 <th>${label} Vol</th>
                 <th>${label} RVol</th>
                 <th>1D %</th>
+                <th>Source</th>
                 <th>Short Interest</th>
                 <th>Float</th>
                 <th>Industry</th>
@@ -926,6 +932,7 @@
                   <td>${fmtVolume(item.session_volume)}</td>
                   <td>${item.session_rvol != null ? `${item.session_rvol.toFixed(2)}x` : 'n/a'}</td>
                   <td class="${deltaClass(item.change_pct)}">${fmtPercent(item.change_pct)}</td>
+                  <td><span class="soft-pill">${esc(item.session_source === 'daily_proxy' ? 'Daily Proxy' : item.session_source === 'quote' ? 'Quote' : 'Extended')}</span></td>
                   <td>${item.short_interest != null ? `${item.short_interest.toFixed(2)}%` : 'n/a'}</td>
                   <td>${item.float_shares != null ? fmtVolume(item.float_shares) : 'n/a'}</td>
                   <td>${esc(item.industry || item.company_name || item.ticker)}</td>
@@ -1458,8 +1465,6 @@
     render();
     loadOverviewBundle();
     loadBrief();
-    loadPremarket();
-    loadPostmarket();
     loadThemes();
     loadEtfs();
     loadRrg();
@@ -1469,8 +1474,8 @@
     document.addEventListener('keydown', handleKeydown);
     window.setInterval(setClock, 1000);
     window.setInterval(() => loadOverviewBundle(true), AUTO_REFRESH_MS);
-    window.setInterval(() => loadPremarket(true), AUTO_REFRESH_MS);
-    window.setInterval(() => loadPostmarket(true), AUTO_REFRESH_MS);
+    window.setInterval(() => { if (state.premarket) loadPremarket(true); }, AUTO_REFRESH_MS);
+    window.setInterval(() => { if (state.postmarket) loadPostmarket(true); }, AUTO_REFRESH_MS);
     window.setInterval(() => loadThemes(true), AUTO_REFRESH_MS);
     window.setInterval(() => loadEtfs(true), AUTO_REFRESH_MS);
     window.setInterval(() => loadRrg(true), AUTO_REFRESH_MS);

@@ -1147,6 +1147,10 @@ def _session_label(session: str) -> str:
     return 'Pre-market' if str(session).lower() == 'pre' else 'Post-market'
 
 
+def _session_cutoff_minutes(session: str) -> int:
+    return 240 if str(session).lower() == 'pre' else 960
+
+
 def _session_minutes_mask(index: pd.DatetimeIndex, session: str):
     minutes = index.hour * 60 + index.minute
     if str(session).lower() == 'pre':
@@ -1229,19 +1233,42 @@ def _previous_regular_close(frame: pd.DataFrame, session: str, session_date) -> 
     return _safe_float(prior['close'].iloc[-1])
 
 
+def _resolve_session_rows(frame: pd.DataFrame, session: str, now_et: datetime) -> pd.DataFrame:
+    if frame.empty:
+        return pd.DataFrame()
+
+    session_rows = frame[_session_minutes_mask(frame.index, session)]
+    if session_rows.empty:
+        return pd.DataFrame()
+
+    available_dates = sorted({stamp.date() for stamp in session_rows.index if stamp.date() <= now_et.date()})
+    if not available_dates:
+        return pd.DataFrame()
+
+    now_minutes = now_et.hour * 60 + now_et.minute
+    cutoff = _session_cutoff_minutes(session)
+    if now_minutes < cutoff:
+        available_dates = [value for value in available_dates if value < now_et.date()]
+        if not available_dates:
+            return pd.DataFrame()
+
+    target_date = available_dates[-1]
+    return session_rows[session_rows.index.date == target_date]
+
+
 def _fetch_session_snapshot(symbol: str, session: str) -> Optional[dict]:
     frame = _fetch_extended_intraday_frame(symbol)
     if frame.empty:
         return None
 
     now_et = datetime.now(timezone.utc).astimezone(EASTERN_TZ)
-    session_rows = frame[_session_minutes_mask(frame.index, session)]
-    session_rows = session_rows[session_rows.index.date == now_et.date()]
+    session_rows = _resolve_session_rows(frame, session, now_et)
     if session_rows.empty:
         return None
 
     session_price = _safe_float(session_rows['close'].iloc[-1])
-    prev_close = _previous_regular_close(frame, session, now_et.date())
+    session_date = session_rows.index[0].date()
+    prev_close = _previous_regular_close(frame, session, session_date)
     if session_price is None or prev_close in (None, 0):
         return None
 
@@ -1396,6 +1423,79 @@ def _build_session_reasoning(detail: dict, headlines: List[dict], session: str, 
     }
 
 
+def _session_seed_symbols(tracked_universe: List[str], quotes: dict, session: str, min_move: float, limit: int) -> List[str]:
+    session_field = _session_field_name(session)
+    direct = sorted(
+        tracked_universe,
+        key=lambda symbol: (
+            -abs(_safe_float((quotes.get(symbol) or {}).get(session_field)) or 0),
+            -(_safe_int((quotes.get(symbol) or {}).get('average_volume')) or 0),
+            -(_safe_float((quotes.get(symbol) or {}).get('market_cap')) or 0),
+        ),
+    )
+    liquid = sorted(
+        tracked_universe,
+        key=lambda symbol: (
+            -(_safe_int((quotes.get(symbol) or {}).get('average_volume')) or 0),
+            -(_safe_float((quotes.get(symbol) or {}).get('market_cap')) or 0),
+        ),
+    )
+
+    desired = max(limit * 4, 36)
+    seeds: List[str] = []
+    for pool in (direct, liquid):
+        for symbol in pool:
+            quote_data = quotes.get(symbol) or {}
+            direct_move = _safe_float(quote_data.get(session_field))
+            daily_move = _safe_float(quote_data.get('change_pct'))
+            average_volume = _safe_int(quote_data.get('average_volume')) or 0
+            market_cap = _safe_float(quote_data.get('market_cap')) or 0
+            if direct_move is None and average_volume < 250000 and market_cap < 250_000_000:
+                continue
+            if direct_move is None and abs(daily_move or 0) < max(min_move, 1.5):
+                continue
+            if symbol not in seeds:
+                seeds.append(symbol)
+            if len(seeds) >= desired:
+                return seeds
+    return seeds
+
+
+def _build_proxy_session_candidates(tracked_universe: List[str], quotes: dict, session: str, min_move: float, limit: int) -> List[dict]:
+    proxy_rows = []
+    floor_move = max(min_move, 2.0)
+    for ticker in tracked_universe:
+        quote_data = quotes.get(ticker) or {}
+        daily_move = _safe_float(quote_data.get('change_pct'))
+        price = _safe_float(quote_data.get('price'))
+        if daily_move is None or abs(daily_move) < floor_move or price in (None, 0):
+            continue
+
+        avg_volume = _safe_int(quote_data.get('average_volume'))
+        volume = _safe_int(quote_data.get('volume'))
+        proxy_rows.append({
+            'ticker': ticker,
+            'company_name': quote_data.get('long_name') or ticker,
+            'session': session,
+            'session_label': _session_label(session),
+            'session_pct': _round_number(daily_move),
+            'session_price': _round_number(price),
+            'session_volume': volume,
+            'session_rvol': round((volume or 0) / avg_volume, 2) if avg_volume else None,
+            'price': _round_number(price),
+            'change_pct': _round_number(daily_move),
+            'volume': volume,
+            'avg_volume': avg_volume,
+            'rvol': round((volume or 0) / avg_volume, 2) if avg_volume else None,
+            'market_cap': quote_data.get('market_cap'),
+            'themes': THEME_LOOKUP.get(ticker, []),
+            'quote_status': 'available',
+            'session_source': 'daily_proxy',
+        })
+
+    return sorted(proxy_rows, key=lambda item: abs(item.get('session_pct') or 0), reverse=True)[:max(limit * 2, 12)]
+
+
 def get_session_movers(session: str = 'pre', min_move: float = 0.5, limit: int = 15) -> dict:
     from news_fetcher import get_stock_news
 
@@ -1403,14 +1503,8 @@ def get_session_movers(session: str = 'pre', min_move: float = 0.5, limit: int =
     tracked_universe = list(dict.fromkeys(STOCK_UNIVERSE + [ticker for tickers in THEMES.values() for ticker in tickers]))
     quotes = _batch_fetch_quotes(tracked_universe)
 
-    priority_symbols = sorted(
-        tracked_universe,
-        key=lambda symbol: (
-            -(_safe_int((quotes.get(symbol) or {}).get('average_volume')) or 0),
-            -(_safe_float((quotes.get(symbol) or {}).get('market_cap')) or 0),
-        ),
-    )[:160]
-    extended_map = _batch_fetch_session_snapshots(priority_symbols, session)
+    priority_symbols = _session_seed_symbols(tracked_universe, quotes, session, min_move, limit)
+    extended_map = _batch_fetch_session_snapshots(priority_symbols, session) if priority_symbols else {}
 
     candidates = []
     for ticker in tracked_universe:
@@ -1446,7 +1540,13 @@ def get_session_movers(session: str = 'pre', min_move: float = 0.5, limit: int =
             'market_cap': quote_data.get('market_cap'),
             'themes': THEME_LOOKUP.get(ticker, []),
             'quote_status': 'available',
+            'session_source': 'extended' if extended else ('quote' if quote_data.get(_session_field_name(session)) is not None else 'daily'),
         })
+
+    source_mode = 'live_session'
+    if not candidates:
+        candidates = _build_proxy_session_candidates(tracked_universe, quotes, session, min_move, limit)
+        source_mode = 'daily_proxy'
 
     leaders = sorted(candidates, key=lambda item: item.get('session_pct') or 0, reverse=True)[:limit]
     laggards = sorted(candidates, key=lambda item: item.get('session_pct') or 0)[:limit]
@@ -1472,7 +1572,7 @@ def get_session_movers(session: str = 'pre', min_move: float = 0.5, limit: int =
             'float_shares': detail.get('float_shares'),
             'industry': detail.get('industry'),
             'sector': detail.get('sector'),
-            'category': session_context.get('event_label'),
+            'category': 'Proxy / Daily Momentum' if item.get('session_source') == 'daily_proxy' else session_context.get('event_label'),
         })
         item['grade'] = _session_grade(item, detail)
 
@@ -1489,6 +1589,7 @@ def get_session_movers(session: str = 'pre', min_move: float = 0.5, limit: int =
             'laggards_count': sum(1 for item in candidates if (item.get('session_pct') or 0) < 0),
             'biggest_up': leader_rows[0]['ticker'] if leader_rows else None,
             'biggest_down': laggard_rows[0]['ticker'] if laggard_rows else None,
+            'source_mode': source_mode,
         },
         'leaders': leader_rows,
         'laggards': laggard_rows,

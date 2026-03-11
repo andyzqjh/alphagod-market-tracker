@@ -448,6 +448,16 @@ def _overlay_live_rrg_point(series: pd.Series, live_price: Optional[float]) -> p
     return updated.sort_index()
 
 
+def _normalize_rrg_series(series: pd.Series) -> pd.Series:
+    if series.empty:
+        return series
+
+    normalized = series.copy()
+    normalized.index = pd.DatetimeIndex(normalized.index).normalize()
+    normalized = normalized[~normalized.index.duplicated(keep='last')]
+    return normalized.sort_index()
+
+
 def _stock_row_from_quote(quote_data: dict) -> Optional[dict]:
     if not quote_data:
         return None
@@ -812,7 +822,7 @@ def get_etf_rrg_data() -> dict:
             frame = future.result()
             history_map[symbol] = frame['adjclose'] if not frame.empty else pd.Series(dtype='float64')
 
-    benchmark_series = history_map.get(benchmark_symbol, pd.Series(dtype='float64'))
+    benchmark_series = _normalize_rrg_series(history_map.get(benchmark_symbol, pd.Series(dtype='float64')))
     if benchmark_series.empty:
         return {
             'updated_at': datetime.now(timezone.utc).isoformat(),
@@ -830,7 +840,7 @@ def get_etf_rrg_data() -> dict:
 
     for item in SECTOR_ETFS:
         symbol = item['symbol']
-        asset_series = history_map.get(symbol, pd.Series(dtype='float64'))
+        asset_series = _normalize_rrg_series(history_map.get(symbol, pd.Series(dtype='float64')))
         if asset_series.empty:
             continue
 

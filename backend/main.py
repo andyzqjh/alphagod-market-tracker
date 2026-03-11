@@ -16,6 +16,7 @@ from data_fetcher import (
     get_earnings_tracker,
     get_market_overview,
     get_screener_data,
+    get_session_movers,
     get_stock_detail,
     get_theme_dashboard,
     get_theme_data,
@@ -162,6 +163,17 @@ def chart_workspace(ticker: str):
     set_cache(key, payload)
     return payload
 
+
+@app.get('/api/session-movers/{session}')
+def session_movers(session: str, min_move: float = Query(default=0.5), limit: int = Query(default=15)):
+    session = 'post' if session.lower() == 'post' else 'pre'
+    key = f'session_movers_{session}_{min_move}_{limit}'
+    cached = get_cached(key, ttl=300)
+    if cached:
+        return cached
+    data = get_session_movers(session=session, min_move=min_move, limit=limit)
+    set_cache(key, data)
+    return data
 
 @app.get('/api/earnings-tracker')
 def earnings_tracker(days_ahead: int = Query(default=21), limit: int = Query(default=120)):

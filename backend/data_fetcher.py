@@ -479,6 +479,8 @@ def get_stock_detail(ticker: str) -> dict:
         'change_pct': quote_data.get('change_pct'),
         'premarket_pct': quote_data.get('pre_market_change_pct'),
         'premarket_price': quote_data.get('pre_market_price'),
+        'postmarket_pct': quote_data.get('post_market_change_pct'),
+        'postmarket_price': quote_data.get('post_market_price'),
         'prev_close': quote_data.get('previous_close') or info.get('previousClose'),
         'volume': int(volume),
         'avg_volume': int(avg_volume),
@@ -489,6 +491,21 @@ def get_stock_detail(ticker: str) -> dict:
         'sector': info.get('sector'),
         'market_cap': quote_data.get('market_cap') or info.get('marketCap'),
         'description': info.get('longBusinessSummary', '')[:600] if info.get('longBusinessSummary') else '',
+        'recommendation': info.get('recommendationKey'),
+        'analyst_count': info.get('numberOfAnalystOpinions'),
+        'target_mean_price': _round_number(info.get('targetMeanPrice')),
+        'target_high_price': _round_number(info.get('targetHighPrice')),
+        'target_low_price': _round_number(info.get('targetLowPrice')),
+        'revenue_growth': _round_number((_safe_float(info.get('revenueGrowth')) or _safe_float(info.get('quarterlyRevenueGrowth'))) * 100) if (_safe_float(info.get('revenueGrowth')) is not None or _safe_float(info.get('quarterlyRevenueGrowth')) is not None) else None,
+        'earnings_growth': _round_number((_safe_float(info.get('earningsGrowth')) or _safe_float(info.get('earningsQuarterlyGrowth'))) * 100) if (_safe_float(info.get('earningsGrowth')) is not None or _safe_float(info.get('earningsQuarterlyGrowth')) is not None) else None,
+        'gross_margin': _round_number(_safe_float(info.get('grossMargins')) * 100) if _safe_float(info.get('grossMargins')) is not None else None,
+        'operating_margin': _round_number(_safe_float(info.get('operatingMargins')) * 100) if _safe_float(info.get('operatingMargins')) is not None else None,
+        'profit_margin': _round_number(_safe_float(info.get('profitMargins')) * 100) if _safe_float(info.get('profitMargins')) is not None else None,
+        'forward_pe': _round_number(info.get('forwardPE')),
+        'trailing_pe': _round_number(info.get('trailingPE')),
+        'price_to_sales': _round_number(info.get('priceToSalesTrailing12Months')),
+        'enterprise_to_ebitda': _round_number(info.get('enterpriseToEbitda')),
+        'beta': _round_number(info.get('beta')),
         'themes': THEME_LOOKUP.get(ticker, []),
     }
 
@@ -1112,4 +1129,189 @@ def get_earnings_tracker(days_ahead: int = 21, limit: int = 120, lookback_days: 
             'top_theme': top_theme,
         },
         'items': items,
+    }
+
+
+def _session_field_name(session: str) -> str:
+    return 'pre_market_change_pct' if str(session).lower() == 'pre' else 'post_market_change_pct'
+
+
+def _session_price_name(session: str) -> str:
+    return 'pre_market_price' if str(session).lower() == 'pre' else 'post_market_price'
+
+
+def _session_label(session: str) -> str:
+    return 'Pre-market' if str(session).lower() == 'pre' else 'Post-market'
+
+
+def _perception_before(detail: dict) -> str:
+    operating_margin = detail.get('operating_margin')
+    gross_margin = detail.get('gross_margin')
+    forward_pe = detail.get('forward_pe')
+    revenue_growth = detail.get('revenue_growth')
+
+    if operating_margin is not None and operating_margin <= 10:
+        return 'a lower-margin execution story where upside depends on proving better mix and better margins'
+    if gross_margin is not None and gross_margin >= 60:
+        return 'a premium-margin platform where the market already expects quality to stay high'
+    if revenue_growth is not None and revenue_growth >= 18 and forward_pe is not None and forward_pe >= 28:
+        return 'a high-expectation growth story where the market is already paying for continued expansion'
+    if forward_pe is not None and forward_pe <= 12:
+        return 'a value-style setup where the market has been cautious on growth durability'
+    return 'an execution-sensitive story where investors still need proof on growth, margins, or durability'
+
+
+def _analyst_expectation(detail: dict) -> str:
+    recommendation = (detail.get('recommendation') or '').lower()
+    analyst_count = detail.get('analyst_count')
+    price = detail.get('price')
+    target = detail.get('target_mean_price')
+    spread = None
+    if price not in (None, 0) and target is not None:
+        spread = ((target - price) / price) * 100
+
+    rec_text = 'Analyst stance is mixed.'
+    if recommendation in ('buy', 'strong_buy'):
+        rec_text = 'The Street is leaning constructive.'
+    elif recommendation in ('hold', 'neutral'):
+        rec_text = 'The Street is mostly in wait-and-see mode.'
+    elif recommendation in ('underperform', 'sell', 'strong_sell'):
+        rec_text = 'The Street is leaning cautious.'
+
+    target_text = 'Published target data is limited.'
+    if spread is not None:
+        if spread >= 12:
+            target_text = f'Consensus target still sits about {spread:.1f}% above the current tape, so expectations still leave room for upside.'
+        elif spread <= -8:
+            target_text = f'The stock is trading roughly {abs(spread):.1f}% above consensus target, so expectations may already be rich.'
+        else:
+            target_text = 'The stock is trading near consensus target levels, so follow-through matters more than headline excitement.'
+
+    coverage_text = f'{analyst_count} analysts are in the published set.' if analyst_count else 'Analyst coverage detail is thin.'
+    return f'{rec_text} {target_text} {coverage_text}'
+
+
+def _headline_driver(headlines: List[dict]) -> tuple[str, str, str]:
+    if not headlines:
+        return 'No fresh headline', 'No clean headline catalyst was returned, so the move may be driven by positioning, sympathy, or delayed price discovery.', 'Unclear'
+
+    item = headlines[0]
+    title = item.get('title') or 'Headline unavailable'
+    text = f"{title} {item.get('summary') or ''}".lower()
+
+    if any(term in text for term in ['margin', 'gross margin', 'operating margin']):
+        return title, 'The catalyst looks tied to margin or mix improvement, which can trigger rerating if the market had been viewing the name as lower quality.', 'Margin / Mix'
+    if any(term in text for term in ['guidance', 'earnings', 'eps', 'revenue', 'beat', 'miss']):
+        return title, 'The catalyst looks earnings-related, so the market is resetting expectations around the next few quarters rather than just reacting to a one-day headline.', 'Earnings / Guidance'
+    if any(term in text for term in ['contract', 'deal', 'partnership', 'award', 'order', 'backlog']):
+        return title, 'The catalyst looks tied to commercial momentum, which matters because it can upgrade confidence in revenue durability and narrative strength.', 'Contract / Commercial'
+    if any(term in text for term in ['ai', 'data center', 'server', 'gpu', 'cloud']):
+        return title, 'The catalyst looks tied to AI or infrastructure demand, which can move the stock if the market believes the company has better positioning than previously assumed.', 'AI / Infrastructure'
+    if any(term in text for term in ['fda', 'approval', 'trial', 'phase', 'drug']):
+        return title, 'The catalyst looks regulatory or trial-driven, so traders are reacting to a possible change in the company outcome set.', 'Regulatory / Clinical'
+    if any(term in text for term in ['probe', 'lawsuit', 'investigation', 'tariff', 'recall', 'delay']):
+        return title, 'The catalyst looks risk-off or headline-damage driven, which can force the market to price in more uncertainty and lower confidence.', 'Risk / Headwind'
+
+    return title, 'The headline looks narrative-driven, so the key question is whether it meaningfully changes expectations or just creates a temporary burst of interest.', 'Narrative'
+
+
+def _build_session_reasoning(detail: dict, headlines: List[dict], session: str, session_pct: float) -> dict:
+    label = _session_label(session)
+    perception_before = _perception_before(detail)
+    analyst_view = _analyst_expectation(detail)
+    headline_title, driver_text, event_label = _headline_driver(headlines)
+
+    if session_pct >= 0:
+        reaction = f'The {label.lower()} move is positive, so the market is testing whether this news deserves a higher multiple or stronger near-term expectations.'
+    else:
+        reaction = f'The {label.lower()} move is negative, so the market is cutting exposure and questioning whether the old story still holds.'
+
+    perception_now = 'Right now the market seems to be probing for rerating.' if session_pct >= 4 else ('Right now the market is leaning constructive but still wants confirmation.' if session_pct > 0 else 'Right now the market is de-risking the setup until the story stabilizes.')
+    reasoning = f"Before this move, the stock was mostly viewed as {perception_before}. {driver_text} {reaction} {analyst_view}"
+
+    return {
+        'headline_title': headline_title,
+        'event_label': event_label,
+        'perception_before': f'Before the move, the market mostly saw the stock as {perception_before}.',
+        'what_changed': driver_text,
+        'market_view': perception_now,
+        'analyst_view': analyst_view,
+        'reasoning': reasoning,
+    }
+
+
+def get_session_movers(session: str = 'pre', min_move: float = 0.5, limit: int = 15) -> dict:
+    from news_fetcher import get_stock_news
+
+    session = 'pre' if str(session).lower() != 'post' else 'post'
+    pct_field = _session_field_name(session)
+    price_field = _session_price_name(session)
+    tracked_universe = list(dict.fromkeys(STOCK_UNIVERSE + [ticker for tickers in THEMES.values() for ticker in tickers]))
+    quotes = _batch_fetch_quotes(tracked_universe)
+
+    candidates = []
+    for ticker in tracked_universe:
+        quote_data = quotes.get(ticker)
+        if not quote_data:
+            continue
+        session_pct = quote_data.get(pct_field)
+        session_price = quote_data.get(price_field)
+        if session_pct is None or abs(session_pct) < min_move:
+            continue
+        candidates.append({
+            'ticker': ticker,
+            'company_name': quote_data.get('long_name') or ticker,
+            'session': session,
+            'session_label': _session_label(session),
+            'session_pct': _round_number(session_pct),
+            'session_price': _round_number(session_price),
+            'price': quote_data.get('price'),
+            'change_pct': quote_data.get('change_pct'),
+            'volume': quote_data.get('volume'),
+            'avg_volume': quote_data.get('average_volume'),
+            'rvol': round((quote_data.get('volume') or 0) / (quote_data.get('average_volume') or 1), 2) if quote_data.get('average_volume') else None,
+            'market_cap': quote_data.get('market_cap'),
+            'themes': THEME_LOOKUP.get(ticker, []),
+            'quote_status': 'available',
+        })
+
+    leaders = sorted(candidates, key=lambda item: item.get('session_pct') or 0, reverse=True)[:limit]
+    laggards = sorted(candidates, key=lambda item: item.get('session_pct') or 0)[:limit]
+
+    ticker_map = {}
+    for item in leaders + laggards:
+        ticker_map[item['ticker']] = dict(item)
+
+    for ticker, item in ticker_map.items():
+        detail = get_stock_detail(ticker)
+        headlines = get_stock_news(ticker)[:3]
+        session_context = _build_session_reasoning(detail, headlines, session, item.get('session_pct') or 0)
+        item.update({
+            'headline_title': session_context.get('headline_title'),
+            'event_label': session_context.get('event_label'),
+            'perception_before': session_context.get('perception_before'),
+            'what_changed': session_context.get('what_changed'),
+            'market_view': session_context.get('market_view'),
+            'analyst_view': session_context.get('analyst_view'),
+            'reasoning': session_context.get('reasoning'),
+            'headline_summary': headlines[0].get('summary') if headlines else '',
+        })
+
+    leader_rows = [ticker_map[item['ticker']] for item in leaders if item['ticker'] in ticker_map]
+    laggard_rows = [ticker_map[item['ticker']] for item in laggards if item['ticker'] in ticker_map]
+    all_rows = sorted(ticker_map.values(), key=lambda item: abs(item.get('session_pct') or 0), reverse=True)
+
+    return {
+        'updated_at': datetime.now(timezone.utc).isoformat(),
+        'session': session,
+        'summary': {
+            'matched_count': len(candidates),
+            'leaders_count': sum(1 for item in candidates if (item.get('session_pct') or 0) > 0),
+            'laggards_count': sum(1 for item in candidates if (item.get('session_pct') or 0) < 0),
+            'biggest_up': leader_rows[0]['ticker'] if leader_rows else None,
+            'biggest_down': laggard_rows[0]['ticker'] if laggard_rows else None,
+        },
+        'leaders': leader_rows,
+        'laggards': laggard_rows,
+        'all': all_rows,
     }

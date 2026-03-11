@@ -143,6 +143,88 @@ def _build_headline_impacts(headlines: List[dict], trend_state: str) -> List[dic
     return impacts
 
 
+def _perception_before(detail: dict) -> str:
+    operating_margin = detail.get('operating_margin')
+    gross_margin = detail.get('gross_margin')
+    forward_pe = detail.get('forward_pe')
+    revenue_growth = detail.get('revenue_growth')
+
+    if operating_margin is not None and operating_margin <= 10:
+        return 'The market has mostly treated this as a lower-margin execution story, so any proof of margin improvement can change the multiple fast.'
+    if gross_margin is not None and gross_margin >= 60:
+        return 'The market already views this as a premium-margin quality name, so the bar for upside surprise is higher.'
+    if revenue_growth is not None and revenue_growth >= 18 and forward_pe is not None and forward_pe >= 28:
+        return 'The stock trades like a growth name where the market is already paying for continued expansion.'
+    if forward_pe is not None and forward_pe <= 12:
+        return 'The market has been valuing this more like a cautious value setup than a clean growth rerating story.'
+    return 'The market still seems to want proof on execution, durability, or quality before giving the stock a higher multiple.'
+
+
+
+def _expectation_view(detail: dict) -> str:
+    recommendation = (detail.get('recommendation') or '').lower()
+    analyst_count = detail.get('analyst_count')
+    price = detail.get('price')
+    target = detail.get('target_mean_price')
+    spread = None
+    if price not in (None, 0) and target is not None:
+        spread = ((target - price) / price) * 100
+
+    pieces = []
+    if recommendation in ('buy', 'strong_buy'):
+        pieces.append('Analysts are leaning constructive.')
+    elif recommendation in ('hold', 'neutral'):
+        pieces.append('Analysts are mostly neutral.')
+    elif recommendation:
+        pieces.append('Analysts are leaning cautious.')
+
+    if spread is not None:
+        if spread >= 12:
+            pieces.append(f'Consensus target still sits about {spread:.1f}% above spot, so the Street still sees upside if execution confirms.')
+        elif spread <= -8:
+            pieces.append(f'The stock is already roughly {abs(spread):.1f}% above consensus target, so the market may already be pricing a better story than analysts publish.')
+        else:
+            pieces.append('The stock is trading near consensus target, so follow-through matters more than the headline itself.')
+
+    if detail.get('revenue_growth') is not None:
+        pieces.append(f'Revenue growth is running around {detail["revenue_growth"]:.1f}%.')
+    if detail.get('earnings_growth') is not None:
+        pieces.append(f'Earnings growth is running around {detail["earnings_growth"]:.1f}%.')
+    if analyst_count:
+        pieces.append(f'{analyst_count} analysts are in the published set.')
+
+    return ' '.join(pieces) or 'Published expectation data is limited, so traders should lean more on price reaction and the latest headlines.'
+
+
+
+def _key_events_summary(headlines: List[dict]) -> str:
+    if not headlines:
+        return 'No fresh company-specific headlines were returned, so the chart is being driven more by positioning and tape behavior than a clean new event.'
+
+    pieces = []
+    for item in headlines[:3]:
+        title = item.get('title') or 'Headline unavailable'
+        summary = (item.get('summary') or '').strip()
+        if summary:
+            pieces.append(f'{title}: {summary[:180]}')
+        else:
+            pieces.append(title)
+    return 'Key events in the feed right now: ' + ' | '.join(pieces)
+
+
+
+def _rerating_read(detail: dict, headlines: List[dict], trend_state: str) -> str:
+    text = ' '.join(f"{item.get('title') or ''} {item.get('summary') or ''}" for item in headlines[:3]).lower()
+    if 'margin' in text:
+        return 'If the market believes margins are inflecting higher, the stock can rerate because the old low-quality or low-margin view starts to break.'
+    if any(term in text for term in ['guidance', 'earnings', 'eps', 'revenue', 'beat']):
+        return 'If the market treats the latest earnings read as a multi-quarter reset instead of a one-off beat, the stock can support a higher valuation band.'
+    if any(term in text for term in ['contract', 'deal', 'partnership', 'order', 'backlog']):
+        return 'If the new business momentum looks durable, investors can shift from waiting to paying up for better visibility.'
+    if trend_state in ('Strong uptrend', 'Constructive uptrend'):
+        return 'The chart is already constructive, so the next rerating step depends on the stock proving this is institutional accumulation rather than a short-term squeeze.'
+    return 'The rerating question is whether the next catalyst changes the market story enough to justify a higher multiple, not just a one-day move.'
+
 def analyze_stock(ticker: str, data: dict, news: str = None) -> dict:
     float_str = 'N/A'
     if data.get('float_shares'):
@@ -338,6 +420,10 @@ def _fallback_chart_reasoning(ticker: str, detail: dict, snapshot: dict, headlin
         'volume': f"Relative volume is running at {rel_vol_text} versus the 20-day average. That tells you whether the move has real sponsorship or is still vulnerable to fading back into the range.",
         'news_summary': f"Latest headlines: {news_rollup}",
         'news_reasoning': lead_impact,
+        'key_events': _key_events_summary(headlines),
+        'market_perception': _perception_before(detail),
+        'expectation': _expectation_view(detail),
+        'rerating_trigger': _rerating_read(detail, headlines, trend_state),
         'risk': f"RSI is {rsi if rsi is not None else 'n/a'}, so watch for exhaustion if momentum is already stretched. The latest headline context is: {top_headline}",
         'headline_impacts': headline_impacts,
     }
@@ -368,6 +454,10 @@ Return ONLY valid JSON with this exact structure:
   "volume": "2-3 sentences on volume/participation",
   "news_summary": "1-2 sentences summarizing the latest news feed",
   "news_reasoning": "2-3 sentences connecting the news flow to the chart behavior",
+  "key_events": "2-3 sentences on the key company events in the feed right now",
+  "market_perception": "2-3 sentences on how the market seems to view the stock right now",
+  "expectation": "2-3 sentences on what the market or Street appears to be expecting",
+  "rerating_trigger": "1-2 sentences on what could force a rerating or de-rating",
   "risk": "1-2 sentences on what can go wrong",
   "headline_impacts": [
     {{"headline": "headline title", "tone": "Bullish", "summary": "one sentence recap", "impact": "1-2 sentence why it matters for the chart now"}},
@@ -379,7 +469,8 @@ Rules:
 - Speak like a trader, not a textbook.
 - Explain what is happening, not just indicators in isolation.
 - Mention whether the chart looks like breakout, pullback, base, or breakdown behavior.
-- Explicitly explain what the latest news suggests for price action.
+- Explicitly explain the key company events in the feed right now.
+- Explain the current market perception and what expectations look like.
 - Use the headline_impacts array to explain the latest news one headline at a time.
 - Return JSON only."""
 

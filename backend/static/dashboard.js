@@ -1,5 +1,7 @@
 (() => {
-  const API_BASE = window.location.protocol === 'file:' ? 'http://localhost:8000' : '';
+  const API_BASE_CANDIDATES = window.location.protocol === 'file:'
+    ? ['https://alphagod-market-tracker.onrender.com', 'http://localhost:8000']
+    : [''];
   const CHART_OVERRIDES = {
     '^GSPC': 'SP:SPX',
     '^IXIC': 'NASDAQ:IXIC',
@@ -7,9 +9,11 @@
     '^RUT': 'RUSSELL:RUT',
     'BTC-USD': 'BITSTAMP:BTCUSD',
   };
-  const TAB_ORDER = ['overview', 'themes', 'flows', 'rrg', 'earnings', 'chart'];
+  const TAB_ORDER = ['overview', 'premarket', 'postmarket', 'themes', 'flows', 'rrg', 'earnings', 'chart'];
   const TAB_LABELS = {
     overview: 'Overview',
+    premarket: 'Pre-market',
+    postmarket: 'Post-market',
     themes: 'Themes',
     flows: 'ETF Flows',
     rrg: 'ETF RRG',
@@ -57,6 +61,8 @@
     selectedTheme: '',
     overview: null,
     briefData: null,
+    premarket: null,
+    postmarket: null,
     themes: null,
     etfs: null,
     rrg: null,
@@ -65,6 +71,8 @@
     loading: {
       overview: false,
       brief: false,
+      premarket: false,
+      postmarket: false,
       themes: false,
       etfs: false,
       rrg: false,
@@ -145,11 +153,20 @@
   }
 
   async function api(path) {
-    const response = await fetch(`${API_BASE}${path}`, { cache: 'no-store' });
-    if (!response.ok) {
-      throw new Error(`Request failed: ${path}`);
+    let lastError = null;
+    for (const base of API_BASE_CANDIDATES) {
+      try {
+        const response = await fetch(`${base}${path}`, { cache: 'no-store' });
+        if (!response.ok) {
+          lastError = new Error(`Request failed: ${path}`);
+          continue;
+        }
+        return response.json();
+      } catch (error) {
+        lastError = error;
+      }
     }
-    return response.json();
+    throw lastError || new Error(`Request failed: ${path}`);
   }
 
   function setClock() {
@@ -300,7 +317,7 @@
   }
   function renderHeader() {
     const hint = window.location.protocol === 'file:'
-      ? 'Opened as a file. Live data is fetched from http://localhost:8000/api/...'
+      ? 'Opened as a file. Live data is fetched from the hosted Render API first, with localhost as fallback.'
       : 'Served by the backend. Live data is fetched from the local API.';
 
     return `
@@ -861,6 +878,102 @@
     `;
   }
 
+  function renderSessionMoversTab(kind) {
+    const payload = state[kind];
+    const rows = payload?.all || [];
+    const label = kind === 'premarket' ? 'Pre-market' : 'Post-market';
+    const summary = payload?.summary || {};
+
+    const summaryHtml = state.loading[kind] && !payload
+      ? emptyState(`Loading ${label.toLowerCase()} movers...`)
+      : state.errors[kind]
+        ? errorState(state.errors[kind])
+        : `
+          <div class="metrics-5">
+            <div class="metric-card"><div class="metric-label">Matched</div><div class="metric-value">${summary.matched_count ?? '--'}</div><div class="metric-copy">Tracked names with a live ${label.toLowerCase()} move above the filter.</div></div>
+            <div class="metric-card"><div class="metric-label">Up</div><div class="metric-value pos">${summary.leaders_count ?? '--'}</div><div class="metric-copy">Names trading green in the ${label.toLowerCase()} tape.</div></div>
+            <div class="metric-card"><div class="metric-label">Down</div><div class="metric-value neg">${summary.laggards_count ?? '--'}</div><div class="metric-copy">Names trading red in the ${label.toLowerCase()} tape.</div></div>
+            <div class="metric-card"><div class="metric-label">Biggest Up</div><div class="metric-value" style="font-size:1.25rem;">${esc(summary.biggest_up || '--')}</div><div class="metric-copy">Top upside mover returned by the live board.</div></div>
+            <div class="metric-card"><div class="metric-label">Biggest Down</div><div class="metric-value" style="font-size:1.25rem;">${esc(summary.biggest_down || '--')}</div><div class="metric-copy">Top downside mover returned by the live board.</div></div>
+          </div>
+        `;
+
+    const boardHtml = rows.length
+      ? `
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Ticker</th>
+                <th>Company</th>
+                <th>${label} %</th>
+                <th>${label} Price</th>
+                <th>1D %</th>
+                <th>Event</th>
+                <th>Perception Before</th>
+                <th>What Changed / Why It Matters</th>
+                <th>Market View Now</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              ${rows.map((item) => `
+                <tr>
+                  <td><button class="chip-btn clicker mono" data-open-desk="${esc(item.ticker)}">${esc(item.ticker)}</button></td>
+                  <td>${esc(item.company_name || item.ticker)}</td>
+                  <td class="${deltaClass(item.session_pct)}">${fmtPercent(item.session_pct)}</td>
+                  <td>${fmtPrice(item.session_price)}</td>
+                  <td class="${deltaClass(item.change_pct)}">${fmtPercent(item.change_pct)}</td>
+                  <td>
+                    <div>${esc(item.event_label || 'Narrative')}</div>
+                    <div class="tiny-copy">${esc(item.headline_title || 'No fresh headline')}</div>
+                  </td>
+                  <td style="min-width:230px; color: var(--muted);">${esc(item.perception_before || 'n/a')}</td>
+                  <td style="min-width:320px; color: var(--muted);">${esc(item.what_changed || item.reasoning || 'n/a')}</td>
+                  <td style="min-width:240px; color: var(--muted);">${esc(item.market_view || item.analyst_view || 'n/a')}</td>
+                  <td><button class="small-btn" data-open-desk="${esc(item.ticker)}">Chart Desk</button></td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        </div>
+      `
+      : emptyState(`No ${label.toLowerCase()} movers were returned yet. If the feed is quiet, try again after the next session update.`);
+
+    return `
+      <div class="main-stack">
+        <section class="panel section">
+          <div class="section-head">
+            <div>
+              <div class="section-kicker">${label} Movers</div>
+              <h2>${label} movers and rerating context</h2>
+              <p>Track the names actually moving in the ${label.toLowerCase()} tape, why they are moving, what the market thought before the catalyst, and whether the setup now looks like a rerating or a fade.</p>
+            </div>
+            <button class="action-btn" data-refresh="${kind}">Refresh ${label}</button>
+          </div>
+          ${summaryHtml}
+        </section>
+        <section class="panel section">
+          <div class="section-head">
+            <div>
+              <div class="section-kicker">Live Board</div>
+              <h2>${label} move board</h2>
+              <p>Open any ticker in the chart desk for deeper context on key events, expectations, and the current market perception.</p>
+            </div>
+          </div>
+          ${boardHtml}
+        </section>
+      </div>
+    `;
+  }
+
+  function renderPremarketTab() {
+    return renderSessionMoversTab('premarket');
+  }
+
+  function renderPostmarketTab() {
+    return renderSessionMoversTab('postmarket');
+  }
   function renderEarningsTab() {
     const earnings = state.earnings;
     const items = earnings?.items || [];
@@ -1006,6 +1119,10 @@
           ['Volume', reasoning.volume],
           ['Latest News', reasoning.news_summary],
           ['News Impact', reasoning.news_reasoning],
+          ['Key Events', reasoning.key_events],
+          ['Market Perception', reasoning.market_perception],
+          ['Expectation', reasoning.expectation],
+          ['Rerating Trigger', reasoning.rerating_trigger],
           ['Risk', reasoning.risk],
         ].map(([label, text]) => `
           <div class="reason-card">
@@ -1081,6 +1198,8 @@
   }
 
   function renderActiveTab() {
+    if (state.activeTab === 'premarket') return renderPremarketTab();
+    if (state.activeTab === 'postmarket') return renderPostmarketTab();
     if (state.activeTab === 'themes') return renderThemesTab();
     if (state.activeTab === 'flows') return renderFlowsTab();
     if (state.activeTab === 'rrg') return renderRrgTab();
@@ -1186,6 +1305,37 @@
     }
   }
 
+  async function loadPremarket(force = false) {
+    if (state.loading.premarket && !force) return;
+    state.loading.premarket = true;
+    state.errors.premarket = '';
+    render();
+    try {
+      state.premarket = await api('/api/session-movers/pre?min_move=0.5&limit=15');
+    } catch (error) {
+      console.error(error);
+      state.errors.premarket = 'Unable to load the pre-market movers right now.';
+    } finally {
+      state.loading.premarket = false;
+      render();
+    }
+  }
+
+  async function loadPostmarket(force = false) {
+    if (state.loading.postmarket && !force) return;
+    state.loading.postmarket = true;
+    state.errors.postmarket = '';
+    render();
+    try {
+      state.postmarket = await api('/api/session-movers/post?min_move=0.5&limit=15');
+    } catch (error) {
+      console.error(error);
+      state.errors.postmarket = 'Unable to load the post-market movers right now.';
+    } finally {
+      state.loading.postmarket = false;
+      render();
+    }
+  }
   async function loadEarnings(force = false) {
     if (state.loading.earnings && !force) return;
     state.loading.earnings = true;
@@ -1227,6 +1377,8 @@
     if (tabButton) {
       state.activeTab = tabButton.dataset.tab;
       render();
+      if (state.activeTab === 'premarket' && !state.premarket) loadPremarket();
+      if (state.activeTab === 'postmarket' && !state.postmarket) loadPostmarket();
       if (state.activeTab === 'chart' && !state.chartWorkspace) loadChartWorkspace(state.chartSymbol);
       if (state.activeTab === 'earnings' && !state.earnings) loadEarnings();
       return;
@@ -1236,6 +1388,8 @@
     if (refreshButton) {
       const target = refreshButton.dataset.refresh;
       if (target === 'overview') { loadOverviewBundle(true); loadBrief(true); }
+      if (target === 'premarket') loadPremarket(true);
+      if (target === 'postmarket') loadPostmarket(true);
       if (target === 'themes') loadThemes(true);
       if (target === 'flows') loadEtfs(true);
       if (target === 'rrg') loadRrg(true);
@@ -1298,6 +1452,8 @@
     render();
     loadOverviewBundle();
     loadBrief();
+    loadPremarket();
+    loadPostmarket();
     loadThemes();
     loadEtfs();
     loadRrg();
@@ -1307,6 +1463,8 @@
     document.addEventListener('keydown', handleKeydown);
     window.setInterval(setClock, 1000);
     window.setInterval(() => loadOverviewBundle(true), AUTO_REFRESH_MS);
+    window.setInterval(() => loadPremarket(true), AUTO_REFRESH_MS);
+    window.setInterval(() => loadPostmarket(true), AUTO_REFRESH_MS);
     window.setInterval(() => loadThemes(true), AUTO_REFRESH_MS);
     window.setInterval(() => loadEtfs(true), AUTO_REFRESH_MS);
     window.setInterval(() => loadRrg(true), AUTO_REFRESH_MS);

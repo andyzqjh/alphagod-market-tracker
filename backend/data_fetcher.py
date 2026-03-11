@@ -1073,6 +1073,137 @@ def get_sp500_latest_news(limit: int = 18) -> dict:
     }
 
 
+def _watchlist_headline_view(headlines: List[dict], limit_per_ticker: int) -> tuple[List[dict], bool]:
+    verified = [item for item in headlines if item.get('verified')]
+    if verified:
+        return verified[:limit_per_ticker], True
+    return headlines[:limit_per_ticker], False
+
+
+def _build_x_search_url(ticker: str, company_name: Optional[str] = None) -> str:
+    query_terms = [f'${ticker}']
+    if company_name:
+        query_terms.append(f'"{company_name}"')
+    query_terms.append('lang:en')
+    query = ' OR '.join(query_terms[:2]) if company_name else query_terms[0]
+    query = f'{query} lang:en'
+    return f'https://x.com/search?q={url_quote(query, safe="")}&src=typed_query&f=live'
+
+
+def _build_watchlist_item(ticker: str, limit_per_ticker: int) -> dict:
+    from news_fetcher import get_stock_news
+
+    detail = get_stock_detail(ticker)
+    company_name = detail.get('company_name') or ticker
+    headlines = get_stock_news(ticker, company_name=company_name, limit=max(limit_per_ticker * 2, 6))
+    display_headlines, has_verified = _watchlist_headline_view(headlines, limit_per_ticker)
+
+    return {
+        'ticker': ticker,
+        'company_name': company_name,
+        'price': detail.get('premarket_price') or detail.get('postmarket_price') or detail.get('price'),
+        'change_pct': detail.get('premarket_pct') if detail.get('premarket_pct') is not None else (
+            detail.get('postmarket_pct') if detail.get('postmarket_pct') is not None else detail.get('change_pct')
+        ),
+        'regular_change_pct': detail.get('change_pct'),
+        'sector': detail.get('sector'),
+        'industry': detail.get('industry'),
+        'market_cap': detail.get('market_cap'),
+        'short_interest': detail.get('short_interest'),
+        'rvol': detail.get('rvol'),
+        'headline_mode': 'verified' if has_verified else 'recent',
+        'has_verified_headline': has_verified,
+        'headline_count': len(display_headlines),
+        'latest_headline_at': display_headlines[0].get('published_at') if display_headlines else None,
+        'x_search_url': _build_x_search_url(ticker, company_name),
+        'headlines': [
+            {
+                'title': item.get('title'),
+                'source': item.get('source'),
+                'url': item.get('url'),
+                'published_at': item.get('published_at'),
+                'summary': item.get('summary'),
+                'verified': bool(item.get('verified')),
+                'match_score': item.get('match_score'),
+            }
+            for item in display_headlines
+        ],
+    }
+
+
+def get_watchlist_news(tickers: List[str], limit_per_ticker: int = 3) -> dict:
+    clean_tickers = []
+    seen = set()
+    for raw in tickers:
+        ticker = str(raw or '').strip().upper()
+        if not ticker or ticker in seen:
+            continue
+        seen.add(ticker)
+        clean_tickers.append(ticker)
+
+    if not clean_tickers:
+        return {
+            'updated_at': datetime.now(timezone.utc).isoformat(),
+            'summary': {
+                'total_tickers': 0,
+                'with_news_count': 0,
+                'with_verified_news_count': 0,
+                'latest_headline_at': None,
+                'total_headlines': 0,
+            },
+            'items': [],
+        }
+
+    items = [None] * len(clean_tickers)
+    with ThreadPoolExecutor(max_workers=min(len(clean_tickers), 6)) as executor:
+        futures = {
+            executor.submit(_build_watchlist_item, ticker, limit_per_ticker): index
+            for index, ticker in enumerate(clean_tickers)
+        }
+        for future in as_completed(futures):
+            index = futures[future]
+            ticker = clean_tickers[index]
+            try:
+                items[index] = future.result()
+            except Exception as exc:
+                LOGGER.warning('Unable to build watchlist row for %s: %s', ticker, exc)
+                items[index] = {
+                    'ticker': ticker,
+                    'company_name': ticker,
+                    'price': None,
+                    'change_pct': None,
+                    'regular_change_pct': None,
+                    'sector': None,
+                    'industry': None,
+                    'market_cap': None,
+                    'short_interest': None,
+                    'rvol': None,
+                    'headline_mode': 'recent',
+                    'has_verified_headline': False,
+                    'headline_count': 0,
+                    'latest_headline_at': None,
+                    'x_search_url': _build_x_search_url(ticker, ticker),
+                    'headlines': [],
+                }
+
+    latest_headline_at = None
+    timestamps = [item.get('latest_headline_at') for item in items if item and item.get('latest_headline_at')]
+    if timestamps:
+        latest_headline_at = max(timestamps)
+
+    return {
+        'updated_at': datetime.now(timezone.utc).isoformat(),
+        'summary': {
+            'total_tickers': len(items),
+            'with_news_count': sum(1 for item in items if item and item.get('headline_count')),
+            'with_verified_news_count': sum(1 for item in items if item and item.get('has_verified_headline')),
+            'latest_headline_at': latest_headline_at,
+            'total_headlines': sum((item.get('headline_count') or 0) for item in items if item),
+        },
+        'items': items,
+    }
+
+
 def get_etf_dashboard() -> dict:
     quotes = _batch_fetch_quotes([item['symbol'] for item in ETF_UNIVERSE])
     all_items = []

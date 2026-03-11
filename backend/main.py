@@ -17,6 +17,7 @@ from data_fetcher import (
     get_market_overview,
     get_sp500_heatmap,
     get_sp500_latest_news,
+    get_watchlist_news,
     get_screener_data,
     get_session_movers,
     get_stock_detail,
@@ -255,6 +256,30 @@ def sp500_news(limit: int = Query(default=18)):
     if cached:
         return cached
     data = get_sp500_latest_news(limit=limit)
+    set_cache(key, data)
+    return data
+
+
+@app.get('/api/watchlist-news')
+def watchlist_news(
+    tickers: str = Query(default=''),
+    limit_per_ticker: int = Query(default=3, ge=1, le=5),
+):
+    ticker_list = []
+    seen = set()
+    for raw in tickers.split(','):
+        ticker = raw.strip().upper()
+        if not ticker or ticker in seen:
+            continue
+        seen.add(ticker)
+        ticker_list.append(ticker)
+    ticker_list = ticker_list[:40]
+
+    key = f'watchlist_news_{"_".join(ticker_list)}_{limit_per_ticker}'
+    cached = get_cached(key, ttl=240)
+    if cached:
+        return cached
+    data = get_watchlist_news(ticker_list, limit_per_ticker=limit_per_ticker)
     set_cache(key, data)
     return data
 

@@ -9,11 +9,12 @@
     '^RUT': 'RUSSELL:RUT',
     'BTC-USD': 'BITSTAMP:BTCUSD',
   };
-  const TAB_ORDER = ['overview', 'heatmap', 'news', 'premarket', 'postmarket', 'themes', 'flows', 'rrg', 'earnings', 'monitor', 'chart'];
+  const TAB_ORDER = ['overview', 'heatmap', 'news', 'watchlist', 'premarket', 'postmarket', 'themes', 'flows', 'rrg', 'earnings', 'monitor', 'chart'];
   const TAB_LABELS = {
     overview: 'Overview',
     heatmap: 'S&P Heatmap',
     news: 'Latest News',
+    watchlist: 'Watchlist',
     premarket: 'Pre-market',
     postmarket: 'Post-market',
     themes: 'Themes',
@@ -31,6 +32,8 @@
   ];
   const AUTO_REFRESH_MS = 300000;
   const RRG_REFRESH_MS = 60000;
+  const WATCHLIST_STORAGE_KEY = 'alphagod_dashboard_watchlist';
+  const WATCHLIST_MAX_SIZE = 40;
   const QUADRANT_COLORS = {
     Leading: '#34d399',
     Weakening: '#f59e0b',
@@ -61,6 +64,8 @@
     chartSymbol: 'SPY',
     chartInput: 'SPY',
     chartInterval: 'D',
+    watchlistInput: '',
+    watchlistTickers: [],
     themeFilter: 'all',
     selectedTheme: '',
     overview: null,
@@ -74,6 +79,7 @@
     monitor: null,
     heatmap: null,
     news: null,
+    watchlist: null,
     chartWorkspace: null,
     loading: {
       overview: false,
@@ -87,6 +93,7 @@
       monitor: false,
       heatmap: false,
       news: false,
+      watchlist: false,
       chart: false,
     },
     errors: {},
@@ -200,6 +207,77 @@
     if (value === 'pre') return 'Pre';
     if (value === 'post') return 'Post';
     return 'Day';
+  }
+
+  function normalizeTickerToken(value) {
+    return String(value || '')
+      .toUpperCase()
+      .replace(/^\$+/, '')
+      .replace(/[^A-Z0-9.^-]/g, '')
+      .trim();
+  }
+
+  function dedupeTickers(list) {
+    const seen = new Set();
+    const items = [];
+    for (const raw of list || []) {
+      const ticker = normalizeTickerToken(raw);
+      if (!ticker || seen.has(ticker)) continue;
+      seen.add(ticker);
+      items.push(ticker);
+      if (items.length >= WATCHLIST_MAX_SIZE) break;
+    }
+    return items;
+  }
+
+  function parseWatchlistInput(value) {
+    return dedupeTickers(String(value || '').split(/[\s,;|]+/));
+  }
+
+  function readStoredWatchlist() {
+    try {
+      const parsed = JSON.parse(window.localStorage.getItem(WATCHLIST_STORAGE_KEY) || '[]');
+      return dedupeTickers(Array.isArray(parsed) ? parsed : []);
+    } catch (error) {
+      return [];
+    }
+  }
+
+  function persistWatchlist(tickers) {
+    try {
+      window.localStorage.setItem(WATCHLIST_STORAGE_KEY, JSON.stringify(tickers));
+    } catch (error) {
+      console.warn('Unable to persist watchlist', error);
+    }
+  }
+
+  function setWatchlistTickers(tickers) {
+    const clean = dedupeTickers(tickers);
+    state.watchlistTickers = clean;
+    state.watchlistInput = clean.join(', ');
+    persistWatchlist(clean);
+  }
+
+  function replaceWatchlistFromInput() {
+    const tickers = parseWatchlistInput(state.watchlistInput);
+    setWatchlistTickers(tickers);
+    state.watchlist = null;
+    state.errors.watchlist = '';
+    render();
+    if (tickers.length) {
+      loadWatchlist(true);
+    }
+  }
+
+  function mergeWatchlistFromInput() {
+    const tickers = dedupeTickers([...state.watchlistTickers, ...parseWatchlistInput(state.watchlistInput)]);
+    setWatchlistTickers(tickers);
+    state.watchlist = null;
+    state.errors.watchlist = '';
+    render();
+    if (tickers.length) {
+      loadWatchlist(true);
+    }
   }
 
   function monitorTone(key, row) {
@@ -1566,6 +1644,119 @@
     `;
   }
 
+  function renderWatchlistHeadline(headline) {
+    return `
+      <a class="headline-item" href="${esc(headline.url || '#')}" target="_blank" rel="noreferrer">
+        <div style="display:flex;justify-content:space-between;gap:12px;align-items:flex-start;">
+          <div style="font-weight:600;">${esc(headline.title || 'Headline')}</div>
+          <span class="soft-pill ${headline.verified ? 'pos' : 'warn'}">${headline.verified ? 'Verified' : 'Recent'}</span>
+        </div>
+        <div class="tiny-copy" style="margin-top:6px;">${esc(headline.source || 'News feed')} | ${fmtDateTime(headline.published_at)}</div>
+        <div style="margin-top:8px;color:var(--muted);">${esc(headline.summary || 'No summary was returned for this headline.')}</div>
+      </a>
+    `;
+  }
+
+  function renderWatchlistCard(item) {
+    const headlines = item?.headlines || [];
+    return `
+      <section class="watchlist-card">
+        <div class="desk-head">
+          <div>
+            <div class="symbol">${esc(item.ticker)}</div>
+            <div class="title">${esc(item.company_name || item.ticker)}</div>
+          </div>
+          <div class="pills">
+            <span class="soft-pill ${deltaClass(item.change_pct)}">${fmtPercent(item.change_pct)}</span>
+            <span class="soft-pill">${fmtPrice(item.price)}</span>
+            <span class="soft-pill ${item.has_verified_headline ? 'pos' : 'warn'}">${item.has_verified_headline ? 'Verified feed' : 'Recent feed'}</span>
+          </div>
+        </div>
+        <div class="watchlist-meta">
+          <span class="soft-pill">${esc(item.sector || 'Sector n/a')}</span>
+          <span class="soft-pill">${esc(item.industry || 'Industry n/a')}</span>
+          <span class="soft-pill">${fmtRvol(item.rvol)}</span>
+          <span class="soft-pill">${fmtMarketCap(item.market_cap)}</span>
+        </div>
+        <div class="watchlist-actions">
+          <button class="small-btn" data-open-desk="${esc(item.ticker)}">Open Chart Desk</button>
+          <a class="small-btn news-link-btn" href="${esc(item.x_search_url || '#')}" target="_blank" rel="noreferrer">Open on X</a>
+          <button class="small-btn" data-watchlist-remove="${esc(item.ticker)}">Remove</button>
+        </div>
+        <div class="watchlist-note">${item.has_verified_headline ? 'Showing verified matched headlines for this ticker.' : 'Showing the most recent matched headlines returned for this ticker. X is linked out, not scraped directly.'}</div>
+        <div class="headline-list">
+          ${headlines.length ? headlines.map((headline) => renderWatchlistHeadline(headline)).join('') : `<div class="empty-state">No recent ticker-specific headlines were returned for ${esc(item.ticker)}.</div>`}
+        </div>
+      </section>
+    `;
+  }
+
+  function renderWatchlistTab() {
+    const watchlist = state.watchlist;
+    const summary = watchlist?.summary || {};
+    const items = watchlist?.items || [];
+    const hasTickers = state.watchlistTickers.length > 0;
+    const chipsHtml = state.watchlistTickers.length
+      ? state.watchlistTickers.map((ticker) => `
+          <button class="watchlist-chip" data-open-desk="${esc(ticker)}">
+            <span>${esc(ticker)}</span>
+            <span class="watchlist-chip-remove" data-watchlist-remove="${esc(ticker)}">x</span>
+          </button>
+        `).join('')
+      : '<div class="tiny-copy">No saved watchlist tickers yet.</div>';
+
+    const summaryHtml = !hasTickers
+      ? emptyState('Add one or more tickers to build your watchlist news board.')
+      : state.loading.watchlist && !watchlist
+        ? emptyState('Loading the watchlist news board...')
+        : state.errors.watchlist
+          ? errorState(state.errors.watchlist)
+          : `
+            <div class="metrics-4">
+              <div class="metric-card"><div class="metric-label">Tickers</div><div class="metric-value">${summary.total_tickers ?? '--'}</div><div class="metric-copy">Saved symbols inside your watchlist.</div></div>
+              <div class="metric-card"><div class="metric-label">With News</div><div class="metric-value">${summary.with_news_count ?? '--'}</div><div class="metric-copy">Names returning recent matched headlines.</div></div>
+              <div class="metric-card"><div class="metric-label">Verified</div><div class="metric-value">${summary.with_verified_news_count ?? '--'}</div><div class="metric-copy">Names with verified matched headlines.</div></div>
+              <div class="metric-card"><div class="metric-label">Latest Headline</div><div class="metric-value" style="font-size:1.15rem;">${summary.latest_headline_at ? fmtDateTime(summary.latest_headline_at) : '--'}</div><div class="metric-copy">${summary.total_headlines ?? 0} headlines currently displayed.</div></div>
+            </div>
+          `;
+
+    const cardsHtml = !hasTickers
+      ? emptyState('Add symbols like NVDA, TSLA, ORCL, MRNA, or any names you want to monitor.')
+      : state.loading.watchlist && !watchlist
+        ? emptyState('Loading watchlist cards...')
+        : state.errors.watchlist && !items.length
+          ? errorState(state.errors.watchlist)
+          : items.map((item) => renderWatchlistCard(item)).join('') || emptyState('No watchlist cards are available right now.');
+
+    return `
+      <div class="main-stack">
+        <section class="panel section">
+          <div class="section-head">
+            <div>
+              <div class="section-kicker">Watchlist</div>
+              <h2>Save your tickers and monitor their latest news</h2>
+              <p>Add one or many symbols, keep them saved in this browser, and pull the latest matched headlines for each stock in one board. Each card also gives you a direct X search link for manual tape checks.</p>
+            </div>
+            <button class="action-btn" data-refresh="watchlist">Refresh Watchlist</button>
+          </div>
+          <div class="watchlist-controls">
+            <input id="watchlist-input" class="watchlist-input" value="${esc(state.watchlistInput)}" placeholder="Add tickers, e.g. NVDA, TSLA, ORCL" />
+            <div class="watchlist-button-row">
+              <button class="action-btn" data-watchlist-add>Add Tickers</button>
+              <button class="action-btn" data-watchlist-save>Replace List</button>
+              <button class="action-btn" data-watchlist-clear>Clear</button>
+            </div>
+          </div>
+          <div class="watchlist-chip-row">${chipsHtml}</div>
+          ${summaryHtml}
+        </section>
+        <section class="watchlist-grid">
+          ${cardsHtml}
+        </section>
+      </div>
+    `;
+  }
+
   function renderChartTab() {
     const workspace = state.chartWorkspace;
     const detail = workspace?.detail || {};
@@ -1681,6 +1872,7 @@
   function renderActiveTab() {
     if (state.activeTab === 'heatmap') return renderHeatmapTab();
     if (state.activeTab === 'news') return renderNewsTab();
+    if (state.activeTab === 'watchlist') return renderWatchlistTab();
     if (state.activeTab === 'premarket') return renderPremarketTab();
     if (state.activeTab === 'postmarket') return renderPostmarketTab();
     if (state.activeTab === 'themes') return renderThemesTab();
@@ -1880,6 +2072,38 @@
       render();
     }
   }
+  async function loadWatchlist(force = false) {
+    if (!state.watchlistTickers.length) {
+      state.watchlist = {
+        updated_at: new Date().toISOString(),
+        summary: {
+          total_tickers: 0,
+          with_news_count: 0,
+          with_verified_news_count: 0,
+          latest_headline_at: null,
+          total_headlines: 0,
+        },
+        items: [],
+      };
+      state.errors.watchlist = '';
+      render();
+      return;
+    }
+    if (state.loading.watchlist && !force) return;
+    state.loading.watchlist = true;
+    state.errors.watchlist = '';
+    render();
+    try {
+      const tickers = encodeURIComponent(state.watchlistTickers.join(','));
+      state.watchlist = await api(`/api/watchlist-news?tickers=${tickers}&limit_per_ticker=3`);
+    } catch (error) {
+      console.error(error);
+      state.errors.watchlist = 'Unable to load the watchlist news board right now.';
+    } finally {
+      state.loading.watchlist = false;
+      render();
+    }
+  }
   async function loadChartWorkspace(symbol, force = false) {
     const clean = String(symbol || state.chartSymbol || '').trim().toUpperCase();
     if (!clean) return;
@@ -1908,6 +2132,7 @@
       render();
       if (state.activeTab === 'heatmap' && !state.heatmap) loadHeatmap();
       if (state.activeTab === 'news' && !state.news) loadNews();
+      if (state.activeTab === 'watchlist' && !state.watchlist && state.watchlistTickers.length) loadWatchlist();
       if (state.activeTab === 'premarket' && !state.premarket) loadPremarket();
       if (state.activeTab === 'postmarket' && !state.postmarket) loadPostmarket();
       if (state.activeTab === 'monitor' && !state.monitor) loadMonitor();
@@ -1929,6 +2154,7 @@
       if (target === 'monitor') loadMonitor(true);
       if (target === 'heatmap') loadHeatmap(true);
       if (target === 'news') loadNews(true);
+      if (target === 'watchlist') loadWatchlist(true);
       return;
     }
 
@@ -1943,6 +2169,37 @@
     if (themeButton) {
       state.selectedTheme = themeButton.dataset.themeSelect;
       render();
+      return;
+    }
+
+    if (event.target.closest('[data-watchlist-add]')) {
+      mergeWatchlistFromInput();
+      return;
+    }
+
+    if (event.target.closest('[data-watchlist-save]')) {
+      replaceWatchlistFromInput();
+      return;
+    }
+
+    if (event.target.closest('[data-watchlist-clear]')) {
+      setWatchlistTickers([]);
+      state.watchlist = null;
+      state.errors.watchlist = '';
+      render();
+      return;
+    }
+
+    const watchlistRemoveButton = event.target.closest('[data-watchlist-remove]');
+    if (watchlistRemoveButton) {
+      const ticker = watchlistRemoveButton.dataset.watchlistRemove;
+      setWatchlistTickers(state.watchlistTickers.filter((item) => item !== ticker));
+      state.watchlist = null;
+      state.errors.watchlist = '';
+      render();
+      if (state.watchlistTickers.length) {
+        loadWatchlist(true);
+      }
       return;
     }
 
@@ -1973,16 +2230,26 @@
   function handleInput(event) {
     if (event.target.id === 'chart-symbol-input') {
       state.chartInput = event.target.value.toUpperCase();
+      return;
+    }
+    if (event.target.id === 'watchlist-input') {
+      state.watchlistInput = event.target.value.toUpperCase();
     }
   }
 
   function handleKeydown(event) {
     if (event.target.id === 'chart-symbol-input' && event.key === 'Enter') {
       openChartDesk(state.chartInput || state.chartSymbol);
+      return;
+    }
+    if (event.target.id === 'watchlist-input' && event.key === 'Enter') {
+      event.preventDefault();
+      replaceWatchlistFromInput();
     }
   }
 
   function boot() {
+    setWatchlistTickers(readStoredWatchlist());
     setClock();
     render();
     loadOverviewBundle();
@@ -2005,6 +2272,7 @@
     window.setInterval(() => { if (state.monitor) loadMonitor(true); }, AUTO_REFRESH_MS);
     window.setInterval(() => { if (state.heatmap) loadHeatmap(true); }, AUTO_REFRESH_MS);
     window.setInterval(() => { if (state.news) loadNews(true); }, AUTO_REFRESH_MS);
+    window.setInterval(() => { if (state.watchlistTickers.length) loadWatchlist(true); }, AUTO_REFRESH_MS);
     window.setInterval(() => loadBrief(true), AUTO_REFRESH_MS);
     window.setTimeout(() => {
       if (state.heatmap || state.loading.heatmap) return;
@@ -2014,6 +2282,10 @@
         }
       });
     }, 1500);
+    window.setTimeout(() => {
+      if (!state.watchlistTickers.length || state.watchlist || state.loading.watchlist) return;
+      loadWatchlist();
+    }, 2800);
   }
 
   boot();

@@ -483,10 +483,47 @@
       </div>
     `;
   }
+  function renderThemeHeatCard(theme, mode) {
+    const movers = (mode === 'laggards' ? theme.laggards : theme.leaders) || [];
+    const toneClass = deltaClass(theme.avg_pct);
+    const barStyle = (theme.avg_pct || 0) >= 0
+      ? 'linear-gradient(90deg,#1dd1a1,#6ee7b7)'
+      : 'linear-gradient(90deg,#fb7185,#fda4af)';
+    const width = Math.min(Math.abs(theme.avg_pct || 0) * 10, 100);
+
+    return `
+      <button class="theme-heat-card" data-theme-select="${esc(theme.theme)}" style="${state.selectedTheme === theme.theme ? 'outline:1px solid rgba(103,198,255,0.35);' : ''}">
+        <div class="theme-heat-head">
+          <div>
+            <div class="section-kicker">Theme</div>
+            <div class="theme-heat-title">${esc(theme.theme)}</div>
+          </div>
+          <div class="theme-heat-move ${toneClass}">${fmtPercent(theme.avg_pct)}</div>
+        </div>
+        <div class="bar"><span style="width:${width}%;background:${barStyle}"></span></div>
+        <div class="pills" style="margin-bottom:12px;">
+          <span class="soft-pill">${theme.stock_count} stocks</span>
+          <span class="soft-pill pos">${theme.up_count} up</span>
+          <span class="soft-pill neg">${theme.down_count} down</span>
+        </div>
+        <div class="theme-stock-list">
+          ${movers.slice(0, 5).map((stock) => `
+            <div class="theme-stock-row">
+              <span class="mono">${esc(stock.ticker)}</span>
+              <span class="${deltaClass(stock.display_pct)}">${fmtPercent(stock.display_pct)}</span>
+            </div>
+          `).join('') || `<div class="tiny-copy">No constituent movers available.</div>`}
+        </div>
+      </button>
+    `;
+  }
+
   function renderThemesTab() {
     const visibleThemes = getVisibleThemes();
     const selectedTheme = getSelectedTheme();
     const summary = state.themes?.summary || {};
+    const bestThemes = state.themes?.leaders || [];
+    const worstThemes = state.themes?.laggards || [];
 
     const headerHtml = state.loading.themes && !state.themes
       ? emptyState('Loading theme dashboard...')
@@ -500,6 +537,18 @@
             <div class="metric-card"><div class="metric-label">Best / Worst</div><div class="metric-value" style="font-size:1.35rem;">${esc(summary.best_theme || '--')}</div><div class="metric-copy">${esc(summary.worst_theme || '--')} | Updated ${fmtTime(state.themes?.updated_at)}</div></div>
           </div>
         `;
+
+    const bestHeatHtml = state.loading.themes && !state.themes
+      ? emptyState('Loading best-performing themes...')
+      : state.errors.themes && !bestThemes.length
+        ? errorState(state.errors.themes)
+        : bestThemes.map((theme) => renderThemeHeatCard(theme, 'leaders')).join('') || emptyState('No best-performing theme tiles are available.');
+
+    const worstHeatHtml = state.loading.themes && !state.themes
+      ? emptyState('Loading weakest themes...')
+      : state.errors.themes && !worstThemes.length
+        ? errorState(state.errors.themes)
+        : worstThemes.map((theme) => renderThemeHeatCard(theme, 'laggards')).join('') || emptyState('No weak-theme tiles are available.');
 
     const cardsHtml = state.loading.themes && !state.themes
       ? emptyState('Loading theme cards...')
@@ -584,7 +633,7 @@
             <div>
               <div class="section-kicker">Theme Board</div>
               <h2>All stocks inside each theme</h2>
-              <p>Use the theme cards to move between leadership groups and inspect every constituent in a full table.</p>
+              <p>Use the heat-map boards to spot leadership fast, then click any theme for the full constituent table.</p>
             </div>
             <button class="action-btn" data-refresh="themes">Refresh Themes</button>
           </div>
@@ -594,6 +643,28 @@
             <button class="filter-btn ${state.themeFilter === 'leaders' ? 'active' : ''}" data-theme-filter="leaders">Best Themes</button>
             <button class="filter-btn ${state.themeFilter === 'laggards' ? 'active' : ''}" data-theme-filter="laggards">Worst Themes</button>
           </div>
+        </section>
+        <section class="theme-boards">
+          <section class="panel section">
+            <div class="section-head">
+              <div>
+                <div class="section-kicker">Best Performing</div>
+                <h2>Heat-map leadership board</h2>
+                <p>Top themes with their strongest constituents listed underneath.</p>
+              </div>
+            </div>
+            <div class="theme-heat-grid">${bestHeatHtml}</div>
+          </section>
+          <section class="panel section">
+            <div class="section-head">
+              <div>
+                <div class="section-kicker">Worst Performing</div>
+                <h2>Heat-map laggard board</h2>
+                <p>Weakest themes with the stocks dragging each basket lower.</p>
+              </div>
+            </div>
+            <div class="theme-heat-grid">${worstHeatHtml}</div>
+          </section>
         </section>
         <section class="theme-grid">${cardsHtml}</section>
         ${detailHtml}

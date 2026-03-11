@@ -877,7 +877,17 @@ def _get_sp500_heatmap_rows(force_refresh: bool = False) -> List[dict]:
     if not constituents:
         return []
 
-    quotes = _batch_fetch_quotes([item['ticker'] for item in constituents], allow_fallbacks=False)
+    symbols = [item['ticker'] for item in constituents]
+    quotes = _batch_fetch_quotes(symbols, allow_fallbacks=False)
+    quote_coverage = sum(1 for symbol in symbols if (quotes.get(symbol) or {}).get('price') is not None)
+    minimum_fast_coverage = max(int(len(symbols) * 0.7), 350)
+    if quote_coverage < minimum_fast_coverage:
+        LOGGER.warning(
+            'Fast S&P 500 quote coverage dropped to %s/%s, retrying with fallbacks.',
+            quote_coverage,
+            len(symbols),
+        )
+        quotes = _batch_fetch_quotes(symbols, allow_fallbacks=True)
     rows = [_sp500_row_from_quote(constituent, quotes.get(constituent['ticker']) or {}) for constituent in constituents]
     _SP500_HEATMAP_CACHE['rows'] = rows
     _SP500_HEATMAP_CACHE['expires_at'] = now + SP500_HEATMAP_CACHE_TTL

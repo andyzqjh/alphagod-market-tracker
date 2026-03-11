@@ -433,7 +433,7 @@ def _overlay_live_rrg_point(series: pd.Series, live_price: Optional[float]) -> p
         return series
 
     updated = series.copy()
-    live_index = pd.Timestamp(datetime.now(timezone.utc).replace(tzinfo=None))
+    live_index = pd.Timestamp(datetime.now(timezone.utc).date())
     last_index = updated.index[-1]
 
     if last_index.date() == live_index.date():

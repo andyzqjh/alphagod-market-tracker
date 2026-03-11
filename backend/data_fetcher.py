@@ -14,6 +14,7 @@ from universe import STOCK_UNIVERSE
 
 YAHOO_QUOTE_URL = 'https://query1.finance.yahoo.com/v7/finance/quote'
 YAHOO_CHART_URL = 'https://query1.finance.yahoo.com/v8/finance/chart/{symbol}'
+YAHOO_SUMMARY_URL = 'https://query1.finance.yahoo.com/v10/finance/quoteSummary/{symbol}'
 REQUEST_TIMEOUT = 12
 QUOTE_BATCH_SIZE = 40
 GROUP_ORDER = ['Broad Market', 'Style & Factors', 'Sectors', 'Rates & Credit', 'Commodities', 'International', 'Thematic', 'Digital Assets']
@@ -63,6 +64,20 @@ def _request_json(url: str, params: Optional[dict] = None) -> dict:
     response = SESSION.get(url, params=params, timeout=REQUEST_TIMEOUT)
     response.raise_for_status()
     return response.json()
+
+
+def _fetch_quote_summary_modules(symbol: str, modules: List[str]) -> dict:
+    if not modules:
+        return {}
+    try:
+        data = _request_json(
+            YAHOO_SUMMARY_URL.format(symbol=url_quote(symbol, safe='')),
+            params={'modules': ','.join(modules)},
+        )
+        result = data.get('quoteSummary', {}).get('result') or []
+        return result[0] if result else {}
+    except Exception:
+        return {}
 
 
 def _shape_quote(raw: dict) -> Optional[dict]:
@@ -911,6 +926,7 @@ def _extract_info_earnings_dates(info: dict) -> List[datetime]:
 
 def _earnings_source_label(source: str) -> str:
     return {
+        'quote_summary': 'Yahoo quote summary',
         'earnings_dates': 'Yahoo earnings dates',
         'calendar': 'Yahoo calendar',
         'info_timestamp': 'Yahoo profile timestamps',
@@ -919,9 +935,10 @@ def _earnings_source_label(source: str) -> str:
 
 def _earnings_source_rank(source: str) -> int:
     return {
-        'earnings_dates': 0,
-        'calendar': 1,
-        'info_timestamp': 2,
+        'quote_summary': 0,
+        'earnings_dates': 1,
+        'calendar': 2,
+        'info_timestamp': 3,
     }.get(source, 9)
 
 
@@ -957,13 +974,50 @@ def _pick_earnings_candidate(candidates: List[dict], now_dt: datetime) -> Option
     )[0]
 
 
+def _extract_quote_summary_earnings_dates(summary: dict) -> List[dict]:
+    earnings = ((summary or {}).get('calendarEvents') or {}).get('earnings') or {}
+    raw_dates = earnings.get('earningsDate') or []
+    if isinstance(raw_dates, dict):
+        raw_dates = [raw_dates]
+
+    eps_estimate = None
+    earnings_average = earnings.get('earningsAverage')
+    if isinstance(earnings_average, dict):
+        eps_estimate = earnings_average.get('raw', earnings_average.get('fmt'))
+    else:
+        eps_estimate = earnings_average
+
+    items = []
+    for value in raw_dates:
+        raw_value = value.get('raw') if isinstance(value, dict) else value
+        earnings_dt = _coerce_timestamp(raw_value)
+        if not earnings_dt:
+            continue
+        items.append({
+            'earnings_date': earnings_dt,
+            'eps_estimate': eps_estimate,
+        })
+    return items
+
+
 def _fetch_single_earnings_event(ticker: str, start_dt: datetime, end_dt: datetime, now_dt: datetime) -> Optional[dict]:
+    candidates = []
+
+    summary = _fetch_quote_summary_modules(ticker, ['calendarEvents'])
+    for item in _extract_quote_summary_earnings_dates(summary):
+        earnings_dt = item.get('earnings_date')
+        if earnings_dt and start_dt <= earnings_dt <= end_dt:
+            candidates.append(_make_earnings_candidate(
+                ticker,
+                earnings_dt,
+                'quote_summary',
+                eps_estimate=item.get('eps_estimate'),
+            ))
+
     try:
         stock = yf.Ticker(ticker)
     except Exception:
-        return None
-
-    candidates = []
+        return _pick_earnings_candidate(candidates, now_dt)
 
     getter = getattr(stock, 'get_earnings_dates', None)
     if callable(getter):
@@ -1056,6 +1110,7 @@ def _build_earnings_reasoning(event: dict, quote_data: dict, themes: List[str], 
 
 def get_earnings_tracker(days_ahead: int = 21, limit: int = 120, lookback_days: int = 7) -> dict:
     now_utc = datetime.now(timezone.utc)
+    market_now = now_utc.astimezone(EASTERN_TZ)
     start_dt = now_utc - timedelta(days=max(lookback_days, 1))
     end_dt = now_utc + timedelta(days=max(days_ahead, 1))
 
@@ -1085,14 +1140,14 @@ def get_earnings_tracker(days_ahead: int = 21, limit: int = 120, lookback_days: 
         ticker = event['ticker']
         quote_data = quotes.get(ticker, {})
         earnings_dt = event['earnings_date']
-        days_until = (earnings_dt.date() - now_utc.date()).days
+        days_until = (earnings_dt.astimezone(EASTERN_TZ).date() - market_now.date()).days
         themes = THEME_LOOKUP.get(ticker, [])
         status = 'Today' if days_until == 0 else ('Upcoming' if days_until > 0 else 'Recent')
         items.append({
             'ticker': ticker,
             'company_name': quote_data.get('long_name') or ticker,
             'earnings_date': earnings_dt.isoformat(),
-            'earnings_date_display': earnings_dt.strftime('%a, %b %d %Y %I:%M %p UTC'),
+            'earnings_date_display': earnings_dt.astimezone(EASTERN_TZ).strftime('%a, %b %d %Y %I:%M %p ET'),
             'days_until': days_until,
             'status': status,
             'eps_estimate': event.get('eps_estimate'),

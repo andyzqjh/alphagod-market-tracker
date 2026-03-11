@@ -178,13 +178,14 @@ def session_movers(session: str, min_move: float = Query(default=0.5), limit: in
 @app.get('/api/earnings-tracker')
 def earnings_tracker(days_ahead: int = Query(default=21), limit: int = Query(default=120)):
     key = f'earnings_tracker_{days_ahead}_{limit}'
-    cached = get_cached(key, ttl=1800)
+    cached = get_cached(key, ttl=120)
     if cached:
         return cached
 
     tracker = get_earnings_tracker(days_ahead=days_ahead, limit=limit)
     tracker['brief'] = build_earnings_brief(tracker)
-    set_cache(key, tracker)
+    if tracker.get('summary', {}).get('total_events', 0) > 0:
+        set_cache(key, tracker)
     return tracker
 
 @app.get('/api/screener')

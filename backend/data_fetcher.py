@@ -3,6 +3,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 from urllib.parse import quote as url_quote
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import requests

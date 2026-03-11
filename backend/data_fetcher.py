@@ -15,6 +15,7 @@ from universe import STOCK_UNIVERSE
 YAHOO_QUOTE_URL = 'https://query1.finance.yahoo.com/v7/finance/quote'
 YAHOO_CHART_URL = 'https://query1.finance.yahoo.com/v8/finance/chart/{symbol}'
 YAHOO_SUMMARY_URL = 'https://query1.finance.yahoo.com/v10/finance/quoteSummary/{symbol}'
+NASDAQ_EARNINGS_URL = 'https://api.nasdaq.com/api/calendar/earnings'
 REQUEST_TIMEOUT = 12
 QUOTE_BATCH_SIZE = 40
 GROUP_ORDER = ['Broad Market', 'Style & Factors', 'Sectors', 'Rates & Credit', 'Commodities', 'International', 'Thematic', 'Digital Assets']
@@ -60,8 +61,8 @@ def _chunked(items: List[str], size: int):
         yield items[index:index + size]
 
 
-def _request_json(url: str, params: Optional[dict] = None) -> dict:
-    response = SESSION.get(url, params=params, timeout=REQUEST_TIMEOUT)
+def _request_json(url: str, params: Optional[dict] = None, headers: Optional[dict] = None) -> dict:
+    response = SESSION.get(url, params=params, headers=headers, timeout=REQUEST_TIMEOUT)
     response.raise_for_status()
     return response.json()
 
@@ -924,8 +925,91 @@ def _extract_info_earnings_dates(info: dict) -> List[datetime]:
     return dates
 
 
+def _clean_numeric_text(value):
+    if value is None:
+        return None
+    if isinstance(value, str):
+        cleaned = value.replace('$', '').replace(',', '').replace('%', '').strip()
+        if not cleaned or cleaned in ('--', 'N/A', 'n/a'):
+            return None
+        return _safe_float(cleaned)
+    return _safe_float(value)
+
+
+def _fetch_nasdaq_earnings_rows(target_date) -> List[dict]:
+    headers = {
+        'accept': 'application/json, text/plain, */*',
+        'origin': 'https://www.nasdaq.com',
+        'referer': 'https://www.nasdaq.com/',
+        'user-agent': SESSION.headers.get('User-Agent', 'Mozilla/5.0'),
+    }
+    try:
+        payload = _request_json(
+            NASDAQ_EARNINGS_URL,
+            params={'date': target_date.strftime('%Y-%m-%d')},
+            headers=headers,
+        )
+    except Exception:
+        return []
+
+    rows = payload.get('data', {}).get('rows') or []
+    return rows if isinstance(rows, list) else []
+
+
+def _nasdaq_row_time_label(row: dict) -> str:
+    text = ' '.join(str(row.get(key, '')) for key in ('time', 'timeFrame', 'when')).strip().lower()
+    if any(term in text for term in ('bmo', 'before market', 'before-market', 'pre-market', 'premarket')):
+        return 'BMO'
+    if any(term in text for term in ('amc', 'after market', 'after-market', 'post-market', 'postmarket')):
+        return 'AMC'
+    return 'TNS'
+
+
+def _nasdaq_event_datetime(target_date, row: dict) -> datetime:
+    label = _nasdaq_row_time_label(row)
+    if label == 'BMO':
+        et_dt = datetime(target_date.year, target_date.month, target_date.day, 8, 0, tzinfo=EASTERN_TZ)
+    elif label == 'AMC':
+        et_dt = datetime(target_date.year, target_date.month, target_date.day, 16, 5, tzinfo=EASTERN_TZ)
+    else:
+        et_dt = datetime(target_date.year, target_date.month, target_date.day, 12, 0, tzinfo=EASTERN_TZ)
+    return et_dt.astimezone(timezone.utc)
+
+
+def _extract_nasdaq_earnings_candidates(tracked_universe: List[str], start_dt: datetime, end_dt: datetime) -> List[dict]:
+    tracked = {ticker.upper() for ticker in tracked_universe}
+    candidate_map = {}
+    current_date = start_dt.astimezone(EASTERN_TZ).date()
+    end_date = end_dt.astimezone(EASTERN_TZ).date()
+
+    while current_date <= end_date:
+        for row in _fetch_nasdaq_earnings_rows(current_date):
+            ticker = str(row.get('symbol') or row.get('ticker') or '').upper().strip()
+            if not ticker or ticker not in tracked:
+                continue
+            earnings_dt = _nasdaq_event_datetime(current_date, row)
+            if earnings_dt < start_dt or earnings_dt > end_dt:
+                continue
+            candidate = _make_earnings_candidate(
+                ticker,
+                earnings_dt,
+                'nasdaq_calendar',
+                eps_estimate=_clean_numeric_text(row.get('epsForecast') or row.get('estimate') or row.get('epsEstimate')),
+                reported_eps=_clean_numeric_text(row.get('eps') or row.get('epsActual') or row.get('reportedEPS')),
+                surprise_pct=_clean_numeric_text(row.get('surprise') or row.get('surprisePercentage') or row.get('surprisePercent')),
+            )
+            candidate['report_time'] = _nasdaq_row_time_label(row)
+            existing = candidate_map.get(ticker)
+            if not existing or abs((candidate['earnings_date'] - start_dt).total_seconds()) < abs((existing['earnings_date'] - start_dt).total_seconds()):
+                candidate_map[ticker] = candidate
+        current_date += timedelta(days=1)
+
+    return list(candidate_map.values())
+
+
 def _earnings_source_label(source: str) -> str:
     return {
+        'nasdaq_calendar': 'Nasdaq calendar',
         'quote_summary': 'Yahoo quote summary',
         'earnings_dates': 'Yahoo earnings dates',
         'calendar': 'Yahoo calendar',
@@ -935,10 +1019,11 @@ def _earnings_source_label(source: str) -> str:
 
 def _earnings_source_rank(source: str) -> int:
     return {
-        'quote_summary': 0,
-        'earnings_dates': 1,
-        'calendar': 2,
-        'info_timestamp': 3,
+        'nasdaq_calendar': 0,
+        'quote_summary': 1,
+        'earnings_dates': 2,
+        'calendar': 3,
+        'info_timestamp': 4,
     }.get(source, 9)
 
 
@@ -1115,12 +1200,13 @@ def get_earnings_tracker(days_ahead: int = 21, limit: int = 120, lookback_days: 
     end_dt = now_utc + timedelta(days=max(days_ahead, 1))
 
     tracked_universe = list(dict.fromkeys(STOCK_UNIVERSE + [ticker for tickers in THEMES.values() for ticker in tickers]))
-    events = []
+    events_by_ticker = {item['ticker']: item for item in _extract_nasdaq_earnings_candidates(tracked_universe, start_dt, end_dt)}
 
-    with ThreadPoolExecutor(max_workers=min(len(tracked_universe), 10)) as executor:
+    fallback_symbols = [ticker for ticker in tracked_universe if ticker not in events_by_ticker]
+    with ThreadPoolExecutor(max_workers=min(len(fallback_symbols), 10) if fallback_symbols else 1) as executor:
         futures = {
             executor.submit(_fetch_single_earnings_event, ticker, start_dt, end_dt, now_utc): ticker
-            for ticker in tracked_universe
+            for ticker in fallback_symbols
         }
         for future in as_completed(futures):
             try:
@@ -1129,25 +1215,32 @@ def get_earnings_tracker(days_ahead: int = 21, limit: int = 120, lookback_days: 
                 LOGGER.warning('Earnings lookup failed for %s: %s', futures[future], exc)
                 continue
             if event:
-                events.append(event)
+                events_by_ticker[event['ticker']] = event
 
-    events.sort(key=lambda item: (item['earnings_date'], item['ticker']))
-    events = events[:limit]
-    quotes = _batch_fetch_quotes([item['ticker'] for item in events])
+    all_events = sorted(events_by_ticker.values(), key=lambda item: (
+        abs((item['earnings_date'] - now_utc).total_seconds()),
+        item['earnings_date'],
+        item['ticker'],
+    ))
+    visible_events = all_events[:limit]
+    quotes = _batch_fetch_quotes([item['ticker'] for item in visible_events])
 
     items = []
-    for event in events:
+    for event in visible_events:
         ticker = event['ticker']
         quote_data = quotes.get(ticker, {})
         earnings_dt = event['earnings_date']
         days_until = (earnings_dt.astimezone(EASTERN_TZ).date() - market_now.date()).days
         themes = THEME_LOOKUP.get(ticker, [])
         status = 'Today' if days_until == 0 else ('Upcoming' if days_until > 0 else 'Recent')
+        display = earnings_dt.astimezone(EASTERN_TZ).strftime('%a, %b %d %Y %I:%M %p ET')
+        if event.get('report_time') in ('BMO', 'AMC', 'TNS'):
+            display = f"{display} ({event['report_time']})"
         items.append({
             'ticker': ticker,
             'company_name': quote_data.get('long_name') or ticker,
             'earnings_date': earnings_dt.isoformat(),
-            'earnings_date_display': earnings_dt.astimezone(EASTERN_TZ).strftime('%a, %b %d %Y %I:%M %p ET'),
+            'earnings_date_display': display,
             'days_until': days_until,
             'status': status,
             'eps_estimate': event.get('eps_estimate'),
@@ -1167,8 +1260,8 @@ def get_earnings_tracker(days_ahead: int = 21, limit: int = 120, lookback_days: 
         })
 
     theme_counts = {}
-    for item in items:
-        for theme in item.get('themes', []):
+    for event in all_events:
+        for theme in THEME_LOOKUP.get(event['ticker'], []):
             theme_counts[theme] = theme_counts.get(theme, 0) + 1
     top_theme = next(iter(sorted(theme_counts, key=theme_counts.get, reverse=True)), None) if theme_counts else None
 
@@ -1176,17 +1269,16 @@ def get_earnings_tracker(days_ahead: int = 21, limit: int = 120, lookback_days: 
         'updated_at': datetime.now(timezone.utc).isoformat(),
         'summary': {
             'coverage_universe': len(tracked_universe),
-            'total_events': len(items),
-            'recent_count': sum(1 for item in items if item['days_until'] < 0),
-            'upcoming_count': sum(1 for item in items if item['days_until'] >= 0),
-            'today_count': sum(1 for item in items if item['days_until'] == 0),
-            'next_7_days': sum(1 for item in items if 0 <= item['days_until'] <= 7),
+            'total_events': len(all_events),
+            'recent_count': sum(1 for event in all_events if (event['earnings_date'].astimezone(EASTERN_TZ).date() - market_now.date()).days < 0),
+            'upcoming_count': sum(1 for event in all_events if (event['earnings_date'].astimezone(EASTERN_TZ).date() - market_now.date()).days >= 0),
+            'today_count': sum(1 for event in all_events if (event['earnings_date'].astimezone(EASTERN_TZ).date() - market_now.date()).days == 0),
+            'next_7_days': sum(1 for event in all_events if 0 <= (event['earnings_date'].astimezone(EASTERN_TZ).date() - market_now.date()).days <= 7),
             'with_live_quotes': sum(1 for item in items if item.get('price') is not None),
             'top_theme': top_theme,
         },
         'items': items,
     }
-
 
 EASTERN_TZ = ZoneInfo('America/New_York')
 

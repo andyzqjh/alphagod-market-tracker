@@ -15,6 +15,8 @@ from data_fetcher import (
     get_etf_rrg_data,
     get_earnings_tracker,
     get_market_overview,
+    get_sp500_heatmap,
+    get_sp500_latest_news,
     get_screener_data,
     get_session_movers,
     get_stock_detail,
@@ -233,6 +235,27 @@ def stockbee_monitor():
         return cached
     data = get_stockbee_monitor()
     set_cache('stockbee_monitor', data)
+    return data
+
+
+@app.get('/api/sp500-heatmap')
+def sp500_heatmap():
+    cached = get_cached('sp500_heatmap', ttl=120)
+    if cached:
+        return cached
+    data = get_sp500_heatmap()
+    set_cache('sp500_heatmap', data)
+    return data
+
+
+@app.get('/api/sp500-news')
+def sp500_news(limit: int = Query(default=18)):
+    key = f'sp500_news_{limit}'
+    cached = get_cached(key, ttl=300)
+    if cached:
+        return cached
+    data = get_sp500_latest_news(limit=limit)
+    set_cache(key, data)
     return data
 
 

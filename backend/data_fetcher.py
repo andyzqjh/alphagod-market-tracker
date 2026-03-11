@@ -1,6 +1,7 @@
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
+from io import StringIO
 from typing import List, Optional
 from urllib.parse import quote as url_quote
 from zoneinfo import ZoneInfo
@@ -16,9 +17,13 @@ YAHOO_QUOTE_URL = 'https://query1.finance.yahoo.com/v7/finance/quote'
 YAHOO_CHART_URL = 'https://query1.finance.yahoo.com/v8/finance/chart/{symbol}'
 YAHOO_SUMMARY_URL = 'https://query1.finance.yahoo.com/v10/finance/quoteSummary/{symbol}'
 NASDAQ_EARNINGS_URL = 'https://api.nasdaq.com/api/calendar/earnings'
+SP500_WIKI_URL = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
+SP500_CSV_FALLBACK_URL = 'https://raw.githubusercontent.com/datasets/s-and-p-500-companies/main/data/constituents.csv'
 REQUEST_TIMEOUT = 12
 QUOTE_BATCH_SIZE = 40
 GROUP_ORDER = ['Broad Market', 'Style & Factors', 'Sectors', 'Rates & Credit', 'Commodities', 'International', 'Thematic', 'Digital Assets']
+SP500_CONSTITUENT_CACHE_TTL = timedelta(hours=6)
+SP500_HEATMAP_CACHE_TTL = timedelta(seconds=90)
 
 SESSION = requests.Session()
 SESSION.headers.update({
@@ -26,6 +31,14 @@ SESSION.headers.update({
                   '(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
 })
 LOGGER = logging.getLogger(__name__)
+_SP500_CONSTITUENTS_CACHE = {
+    'expires_at': datetime.fromtimestamp(0, tz=timezone.utc),
+    'items': [],
+}
+_SP500_HEATMAP_CACHE = {
+    'expires_at': datetime.fromtimestamp(0, tz=timezone.utc),
+    'rows': [],
+}
 
 THEME_LOOKUP = {}
 for theme_name, tickers in THEMES.items():
@@ -733,6 +746,317 @@ def get_theme_dashboard() -> dict:
         'leaders': leaders,
         'laggards': laggards,
         'all': themes,
+    }
+
+
+def _normalize_sp500_columns(frame: pd.DataFrame) -> dict:
+    lookup = {}
+    for column in frame.columns:
+        normalized = str(column).strip().lower().replace('\xa0', ' ')
+        normalized = normalized.replace('-', ' ').replace('_', ' ')
+        normalized = ' '.join(normalized.split())
+        lookup[normalized] = column
+    return lookup
+
+
+def _rows_from_sp500_frame(frame: pd.DataFrame) -> List[dict]:
+    columns = _normalize_sp500_columns(frame)
+    symbol_col = columns.get('symbol')
+    company_col = columns.get('security') or columns.get('name')
+    sector_col = columns.get('gics sector') or columns.get('sector')
+    sub_industry_col = columns.get('gics sub industry') or columns.get('sub industry')
+    if not symbol_col or not company_col or not sector_col:
+        return []
+
+    seen = set()
+    rows = []
+    for record in frame.to_dict('records'):
+        ticker = str(record.get(symbol_col) or '').strip().upper()
+        if not ticker:
+            continue
+        ticker = ticker.replace('.', '-')
+        if ticker in seen:
+            continue
+        seen.add(ticker)
+        rows.append({
+            'ticker': ticker,
+            'company_name': str(record.get(company_col) or ticker).strip(),
+            'sector': str(record.get(sector_col) or 'Unassigned').strip() or 'Unassigned',
+            'sub_industry': str(record.get(sub_industry_col) or '').strip() or None,
+        })
+    return rows
+
+
+def _fetch_sp500_constituents_from_wikipedia() -> List[dict]:
+    response = SESSION.get(SP500_WIKI_URL, timeout=REQUEST_TIMEOUT)
+    response.raise_for_status()
+    for frame in pd.read_html(StringIO(response.text)):
+        rows = _rows_from_sp500_frame(frame)
+        if rows:
+            return rows
+    return []
+
+
+def _fetch_sp500_constituents_from_csv() -> List[dict]:
+    response = SESSION.get(SP500_CSV_FALLBACK_URL, timeout=REQUEST_TIMEOUT)
+    response.raise_for_status()
+    frame = pd.read_csv(StringIO(response.text))
+    return _rows_from_sp500_frame(frame)
+
+
+def _get_sp500_constituents(force_refresh: bool = False) -> List[dict]:
+    now = datetime.now(timezone.utc)
+    if not force_refresh and _SP500_CONSTITUENTS_CACHE['items'] and now < _SP500_CONSTITUENTS_CACHE['expires_at']:
+        return _SP500_CONSTITUENTS_CACHE['items']
+
+    loaders = (
+        _fetch_sp500_constituents_from_wikipedia,
+        _fetch_sp500_constituents_from_csv,
+    )
+    errors = []
+    for loader in loaders:
+        try:
+            rows = loader()
+        except Exception as exc:
+            errors.append(f'{loader.__name__}: {exc}')
+            continue
+        if rows:
+            _SP500_CONSTITUENTS_CACHE['items'] = rows
+            _SP500_CONSTITUENTS_CACHE['expires_at'] = now + SP500_CONSTITUENT_CACHE_TTL
+            return rows
+
+    if _SP500_CONSTITUENTS_CACHE['items']:
+        LOGGER.warning('Using stale S&P 500 constituents cache after refresh failure: %s', ' | '.join(errors))
+        return _SP500_CONSTITUENTS_CACHE['items']
+
+    LOGGER.warning('Unable to load S&P 500 constituents: %s', ' | '.join(errors) or 'unknown error')
+    return []
+
+
+def _sp500_row_from_quote(constituent: dict, quote_data: dict) -> dict:
+    volume = _safe_int(quote_data.get('volume'))
+    avg_volume = _safe_int(quote_data.get('average_volume'))
+    regular_price = _safe_float(quote_data.get('price'))
+    regular_change_pct = _safe_float(quote_data.get('change_pct'))
+    extended_price = _safe_float(quote_data.get('extended_price'))
+    extended_change_pct = _safe_float(quote_data.get('extended_change_pct'))
+    display_price = extended_price if extended_price is not None else regular_price
+    display_change_pct = extended_change_pct if extended_change_pct is not None else regular_change_pct
+    rvol = round(volume / avg_volume, 2) if volume is not None and avg_volume not in (None, 0) else None
+
+    return {
+        'ticker': constituent['ticker'],
+        'company_name': constituent['company_name'],
+        'sector': constituent.get('sector') or 'Unassigned',
+        'sub_industry': constituent.get('sub_industry'),
+        'price': _round_number(regular_price),
+        'display_price': _round_number(display_price),
+        'change_pct': _round_number(regular_change_pct),
+        'display_change_pct': _round_number(display_change_pct),
+        'extended_price': _round_number(extended_price),
+        'extended_change_pct': _round_number(extended_change_pct),
+        'extended_session': quote_data.get('extended_session'),
+        'volume': volume,
+        'avg_volume': avg_volume,
+        'rvol': rvol,
+        'market_cap': _safe_float(quote_data.get('market_cap')),
+        'market_state': quote_data.get('market_state'),
+        'quote_status': 'available' if quote_data else 'unavailable',
+    }
+
+
+def _get_sp500_heatmap_rows(force_refresh: bool = False) -> List[dict]:
+    now = datetime.now(timezone.utc)
+    if not force_refresh and _SP500_HEATMAP_CACHE['rows'] and now < _SP500_HEATMAP_CACHE['expires_at']:
+        return _SP500_HEATMAP_CACHE['rows']
+
+    constituents = _get_sp500_constituents(force_refresh=force_refresh)
+    if not constituents:
+        return []
+
+    quotes = _batch_fetch_quotes([item['ticker'] for item in constituents])
+    rows = [_sp500_row_from_quote(constituent, quotes.get(constituent['ticker']) or {}) for constituent in constituents]
+    _SP500_HEATMAP_CACHE['rows'] = rows
+    _SP500_HEATMAP_CACHE['expires_at'] = now + SP500_HEATMAP_CACHE_TTL
+    return rows
+
+
+def _weighted_change_pct(items: List[dict]) -> Optional[float]:
+    weighted = [(item.get('display_change_pct'), item.get('market_cap')) for item in items if item.get('display_change_pct') is not None and item.get('market_cap')]
+    if weighted:
+        total_weight = sum(weight for _, weight in weighted)
+        if total_weight:
+            return round(sum(change * weight for change, weight in weighted) / total_weight, 2)
+
+    valid = [item.get('display_change_pct') for item in items if item.get('display_change_pct') is not None]
+    if not valid:
+        return None
+    return round(sum(valid) / len(valid), 2)
+
+
+def get_sp500_heatmap() -> dict:
+    rows = _get_sp500_heatmap_rows()
+    if not rows:
+        return {
+            'updated_at': datetime.now(timezone.utc).isoformat(),
+            'summary': {
+                'total_constituents': 0,
+                'quoted_count': 0,
+                'advancers': 0,
+                'decliners': 0,
+                'flat': 0,
+                'best_sector': None,
+                'worst_sector': None,
+                'biggest_up': None,
+                'biggest_down': None,
+            },
+            'leaders': [],
+            'laggards': [],
+            'sectors': [],
+            'error': 'Unable to load the S&P 500 heatmap right now.',
+        }
+
+    live_rows = [row for row in rows if row.get('display_change_pct') is not None]
+    advancers = sum(1 for row in live_rows if (row.get('display_change_pct') or 0) > 0)
+    decliners = sum(1 for row in live_rows if (row.get('display_change_pct') or 0) < 0)
+    flat = len(live_rows) - advancers - decliners
+
+    sector_map = {}
+    for row in rows:
+        sector_map.setdefault(row.get('sector') or 'Unassigned', []).append(row)
+
+    sectors = []
+    for sector_name, items in sector_map.items():
+        sector_live_rows = [item for item in items if item.get('display_change_pct') is not None]
+        total_market_cap = sum(item.get('market_cap') or 0 for item in items)
+        sectors.append({
+            'sector': sector_name,
+            'avg_change_pct': _weighted_change_pct(items),
+            'total_market_cap': total_market_cap or None,
+            'advancers': sum(1 for item in sector_live_rows if (item.get('display_change_pct') or 0) > 0),
+            'decliners': sum(1 for item in sector_live_rows if (item.get('display_change_pct') or 0) < 0),
+            'flat': sum(1 for item in sector_live_rows if (item.get('display_change_pct') or 0) == 0),
+            'quoted_count': len(sector_live_rows),
+            'items': sorted(items, key=lambda item: (-(item.get('market_cap') or 0), item.get('ticker') or '')),
+        })
+
+    sectors.sort(key=lambda item: (-(item.get('total_market_cap') or 0), item.get('sector') or ''))
+    ranked_sectors = sorted(
+        [item for item in sectors if item.get('avg_change_pct') is not None],
+        key=lambda item: item.get('avg_change_pct') or 0,
+        reverse=True,
+    )
+    leaders = sorted(live_rows, key=lambda item: item.get('display_change_pct') or 0, reverse=True)[:12]
+    laggards = sorted(live_rows, key=lambda item: item.get('display_change_pct') or 0)[:12]
+
+    return {
+        'updated_at': datetime.now(timezone.utc).isoformat(),
+        'summary': {
+            'total_constituents': len(rows),
+            'quoted_count': len(live_rows),
+            'advancers': advancers,
+            'decliners': decliners,
+            'flat': flat,
+            'best_sector': ranked_sectors[0]['sector'] if ranked_sectors else None,
+            'worst_sector': ranked_sectors[-1]['sector'] if ranked_sectors else None,
+            'biggest_up': leaders[0]['ticker'] if leaders else None,
+            'biggest_down': laggards[0]['ticker'] if laggards else None,
+        },
+        'leaders': leaders,
+        'laggards': laggards,
+        'sectors': sectors,
+    }
+
+
+def _select_sp500_news_candidates(rows: List[dict], target_count: int = 24) -> List[dict]:
+    liquid_rows = [row for row in rows if row.get('display_change_pct') is not None]
+    movers = sorted(liquid_rows, key=lambda item: abs(item.get('display_change_pct') or 0), reverse=True)
+    large_caps = sorted(liquid_rows, key=lambda item: item.get('market_cap') or 0, reverse=True)
+    active = sorted(
+        liquid_rows,
+        key=lambda item: (
+            -(item.get('rvol') or 0),
+            -abs(item.get('display_change_pct') or 0),
+            -(item.get('market_cap') or 0),
+        ),
+    )
+
+    candidates = []
+    seen = set()
+    for pool in (movers[:16], large_caps[:10], active[:10]):
+        for item in pool:
+            ticker = item.get('ticker')
+            if not ticker or ticker in seen:
+                continue
+            seen.add(ticker)
+            candidates.append(item)
+            if len(candidates) >= target_count:
+                return candidates
+    return candidates
+
+
+def _sp500_news_row(row: dict) -> Optional[dict]:
+    from news_fetcher import get_stock_news
+
+    headlines = get_stock_news(row['ticker'], company_name=row.get('company_name') or row['ticker'], limit=4)
+    verified = [item for item in headlines if item.get('verified')]
+    if not verified:
+        return None
+
+    headline = verified[0]
+    return {
+        'ticker': row['ticker'],
+        'company_name': row.get('company_name') or row['ticker'],
+        'sector': row.get('sector'),
+        'sub_industry': row.get('sub_industry'),
+        'display_price': row.get('display_price'),
+        'display_change_pct': row.get('display_change_pct'),
+        'change_pct': row.get('change_pct'),
+        'extended_session': row.get('extended_session') or 'regular',
+        'market_cap': row.get('market_cap'),
+        'rvol': row.get('rvol'),
+        'title': headline.get('title'),
+        'source': headline.get('source'),
+        'url': headline.get('url'),
+        'published_at': headline.get('published_at'),
+        'time': headline.get('time') or 0,
+        'summary': headline.get('summary'),
+        'verified': True,
+        'match_score': headline.get('match_score'),
+    }
+
+
+def get_sp500_latest_news(limit: int = 18) -> dict:
+    rows = _get_sp500_heatmap_rows()
+    candidates = _select_sp500_news_candidates(rows)
+    news_rows = []
+
+    with ThreadPoolExecutor(max_workers=min(max(len(candidates), 1), 6)) as executor:
+        futures = {executor.submit(_sp500_news_row, item): item for item in candidates}
+        for future in as_completed(futures):
+            try:
+                item = future.result()
+            except Exception as exc:
+                ticker = futures[future].get('ticker')
+                LOGGER.warning('Unable to load verified news for %s: %s', ticker, exc)
+                continue
+            if item:
+                news_rows.append(item)
+
+    news_rows.sort(key=lambda item: (-(item.get('time') or 0), -(abs(item.get('display_change_pct') or 0)), -(item.get('match_score') or 0)))
+    trimmed = news_rows[:max(limit, 1)]
+    sectors = sorted({item.get('sector') for item in trimmed if item.get('sector')})
+
+    return {
+        'updated_at': datetime.now(timezone.utc).isoformat(),
+        'summary': {
+            'candidate_count': len(candidates),
+            'rendered_count': len(trimmed),
+            'sectors_represented': len(sectors),
+            'latest_headline_at': trimmed[0].get('published_at') if trimmed else None,
+            'biggest_move_with_news': max(trimmed, key=lambda item: abs(item.get('display_change_pct') or 0), default={}).get('ticker'),
+        },
+        'items': trimmed,
     }
 
 

@@ -9,9 +9,11 @@
     '^RUT': 'RUSSELL:RUT',
     'BTC-USD': 'BITSTAMP:BTCUSD',
   };
-  const TAB_ORDER = ['overview', 'premarket', 'postmarket', 'themes', 'flows', 'rrg', 'earnings', 'monitor', 'chart'];
+  const TAB_ORDER = ['overview', 'heatmap', 'news', 'premarket', 'postmarket', 'themes', 'flows', 'rrg', 'earnings', 'monitor', 'chart'];
   const TAB_LABELS = {
     overview: 'Overview',
+    heatmap: 'S&P Heatmap',
+    news: 'Latest News',
     premarket: 'Pre-market',
     postmarket: 'Post-market',
     themes: 'Themes',
@@ -70,6 +72,8 @@
     rrg: null,
     earnings: null,
     monitor: null,
+    heatmap: null,
+    news: null,
     chartWorkspace: null,
     loading: {
       overview: false,
@@ -81,6 +85,8 @@
       rrg: false,
       earnings: false,
       monitor: false,
+      heatmap: false,
+      news: false,
       chart: false,
     },
     errors: {},
@@ -124,6 +130,20 @@
     return String(number);
   }
 
+  function fmtMarketCap(value) {
+    if (value == null || Number.isNaN(Number(value))) return 'n/a';
+    const number = Number(value);
+    if (number >= 1e12) return `$${(number / 1e12).toFixed(2)}T`;
+    if (number >= 1e9) return `$${(number / 1e9).toFixed(1)}B`;
+    if (number >= 1e6) return `$${(number / 1e6).toFixed(0)}M`;
+    return fmtPrice(number);
+  }
+
+  function fmtRvol(value) {
+    if (value == null || Number.isNaN(Number(value))) return 'n/a';
+    return `${Number(value).toFixed(2)}x`;
+  }
+
   function fmtTime(value) {
     if (!value) return '--';
     return new Date(value).toLocaleTimeString('en-US', {
@@ -153,6 +173,33 @@
     if (tone === 'bullish') return 'bullish';
     if (tone === 'bearish') return 'bearish';
     return 'neutral';
+  }
+
+  function heatSizeClass(marketCap) {
+    const value = Number(marketCap);
+    if (!Number.isFinite(value)) return 'xs';
+    if (value >= 500e9) return 'lg';
+    if (value >= 150e9) return 'md';
+    if (value >= 30e9) return 'sm';
+    return 'xs';
+  }
+
+  function heatTileStyle(changePct) {
+    const value = Number(changePct);
+    if (!Number.isFinite(value)) {
+      return 'background: rgba(255,255,255,0.76); border-color: rgba(20,38,58,0.08);';
+    }
+    const intensity = Math.min(Math.abs(value) / 6, 1);
+    if (value >= 0) {
+      return `background: rgba(52, 211, 153, ${0.1 + intensity * 0.18}); border-color: rgba(52, 211, 153, ${0.2 + intensity * 0.18});`;
+    }
+    return `background: rgba(251, 113, 133, ${0.1 + intensity * 0.18}); border-color: rgba(251, 113, 133, ${0.22 + intensity * 0.18});`;
+  }
+
+  function sessionLabel(value) {
+    if (value === 'pre') return 'Pre';
+    if (value === 'post') return 'Post';
+    return 'Day';
   }
 
   function monitorTone(key, row) {
@@ -383,8 +430,8 @@
         <div class="hero-top">
           <div>
             <div class="kicker">HTML Market Dashboard</div>
-            <h1>Live market dashboard with full theme constituents, ETF rotation, and AI chart context.</h1>
-            <p>Track the tape, inspect every stock inside a theme, monitor ETF capital-flow proxies, and open a chart desk with AI commentary beside the TradingView chart.</p>
+            <h1>Live market dashboard with S&amp;P heatmap, verified news, ETF rotation, and AI chart context.</h1>
+            <p>Track the tape, scan every S&amp;P 500 sector tile, toggle into the latest verified headlines, inspect theme constituents, and open a chart desk with AI commentary beside the TradingView chart.</p>
           </div>
           <div class="clock-card">
             <div class="label">Current time</div>
@@ -1312,6 +1359,213 @@
       </div>
     `;
   }
+
+  function renderHeatmapMoverRows(items, emptyMessage) {
+    if (!items.length) return emptyState(emptyMessage);
+    return `
+      <div class="heatmap-mini-list">
+        ${items.map((item) => `
+          <button class="heatmap-mini-row" data-open-desk="${esc(item.ticker)}">
+            <div>
+              <div class="symbol">${esc(item.ticker)}</div>
+              <div class="tiny-copy">${esc(item.company_name || item.ticker)}</div>
+            </div>
+            <div style="text-align:right;">
+              <div class="${deltaClass(item.display_change_pct)}" style="font-weight:700;">${fmtPercent(item.display_change_pct)}</div>
+              <div class="tiny-copy">${fmtPrice(item.display_price)}</div>
+            </div>
+          </button>
+        `).join('')}
+      </div>
+    `;
+  }
+
+  function renderHeatmapSectorCard(sector) {
+    const items = Array.isArray(sector?.items) ? sector.items : [];
+    return `
+      <section class="panel section heatmap-sector-card">
+        <div class="heatmap-sector-head">
+          <div>
+            <div class="section-kicker">Sector</div>
+            <h2>${esc(sector.sector || 'Unassigned')}</h2>
+            <p>${sector.quoted_count ?? 0} live quotes across the sector. Tiles are sized by market cap and shaded by the latest available move.</p>
+          </div>
+          <div class="pills">
+            <span class="soft-pill ${deltaClass(sector.avg_change_pct)}">Avg ${fmtPercent(sector.avg_change_pct)}</span>
+            <span class="soft-pill pos">${sector.advancers ?? 0} up</span>
+            <span class="soft-pill neg">${sector.decliners ?? 0} down</span>
+            <span class="soft-pill">${fmtMarketCap(sector.total_market_cap)}</span>
+          </div>
+        </div>
+        <div class="heatmap-grid">
+          ${items.map((item) => `
+            <button
+              class="heatmap-tile ${heatSizeClass(item.market_cap)}"
+              data-open-desk="${esc(item.ticker)}"
+              style="${heatTileStyle(item.display_change_pct)}"
+            >
+              <div class="heatmap-topline">
+                <span class="symbol">${esc(item.ticker)}</span>
+                <span class="heatmap-session">${esc(sessionLabel(item.extended_session))}</span>
+              </div>
+              <div class="heatmap-company">${esc(item.company_name || item.ticker)}</div>
+              <div class="heatmap-price">${fmtPrice(item.display_price)}</div>
+              <div class="heatmap-bottomline">
+                <span class="${deltaClass(item.display_change_pct)}" style="font-weight:700;">${fmtPercent(item.display_change_pct)}</span>
+                <span class="tiny-copy">${fmtMarketCap(item.market_cap)}</span>
+              </div>
+            </button>
+          `).join('')}
+        </div>
+      </section>
+    `;
+  }
+
+  function renderHeatmapTab() {
+    const heatmap = state.heatmap;
+    const summary = heatmap?.summary || {};
+    const sectors = heatmap?.sectors || [];
+    const leaders = heatmap?.leaders || [];
+    const laggards = heatmap?.laggards || [];
+
+    const summaryHtml = state.loading.heatmap && !heatmap
+      ? emptyState('Loading the live S&P 500 heatmap...')
+      : state.errors.heatmap
+        ? errorState(state.errors.heatmap)
+        : `
+          <div class="metrics-5">
+            <div class="metric-card"><div class="metric-label">Constituents</div><div class="metric-value">${summary.total_constituents ?? '--'}</div><div class="metric-copy">Names currently tracked inside the S&amp;P 500 heatmap.</div></div>
+            <div class="metric-card"><div class="metric-label">Advancers</div><div class="metric-value pos">${summary.advancers ?? '--'}</div><div class="metric-copy">Stocks trading above the prior close or extended-session anchor.</div></div>
+            <div class="metric-card"><div class="metric-label">Decliners</div><div class="metric-value neg">${summary.decliners ?? '--'}</div><div class="metric-copy">Stocks shading red on the live board.</div></div>
+            <div class="metric-card"><div class="metric-label">Best Sector</div><div class="metric-value" style="font-size:1.2rem;">${esc(summary.best_sector || '--')}</div><div class="metric-copy">Highest weighted sector move right now.</div></div>
+            <div class="metric-card"><div class="metric-label">Worst Sector</div><div class="metric-value" style="font-size:1.2rem;">${esc(summary.worst_sector || '--')}</div><div class="metric-copy">Weakest weighted sector on the board.</div></div>
+          </div>
+        `;
+
+    const sectorsHtml = state.loading.heatmap && !heatmap
+      ? emptyState('Building sector tiles...')
+      : state.errors.heatmap && !sectors.length
+        ? errorState(state.errors.heatmap)
+        : sectors.map((sector) => renderHeatmapSectorCard(sector)).join('') || emptyState('No sector tiles are available right now.');
+
+    return `
+      <div class="main-stack">
+        <section class="panel section">
+          <div class="section-head">
+            <div>
+              <div class="section-kicker">S&amp;P 500 Heatmap</div>
+              <h2>Live sector heatmap by current prices</h2>
+              <p>Use the heatmap to scan the full S&amp;P 500 at a glance. The latest price move drives the tile color, and larger companies get more visual weight.</p>
+            </div>
+            <button class="action-btn" data-refresh="heatmap">Refresh Heatmap</button>
+          </div>
+          ${summaryHtml}
+        </section>
+        <section class="heatmap-sidecar">
+          <section class="panel section">
+            <div class="section-head">
+              <div>
+                <div class="section-kicker">Leadership</div>
+                <h2>Top movers</h2>
+                <p>The strongest S&amp;P 500 names by latest available move.</p>
+              </div>
+            </div>
+            ${renderHeatmapMoverRows(leaders, 'No advancing tiles are available right now.')}
+          </section>
+          <section class="panel section">
+            <div class="section-head">
+              <div>
+                <div class="section-kicker">Pressure</div>
+                <h2>Weakest movers</h2>
+                <p>The most pressured S&amp;P 500 names on the board.</p>
+              </div>
+            </div>
+            ${renderHeatmapMoverRows(laggards, 'No declining tiles are available right now.')}
+          </section>
+        </section>
+        <section class="heatmap-sectors">
+          ${sectorsHtml}
+        </section>
+      </div>
+    `;
+  }
+
+  function renderNewsCard(item) {
+    return `
+      <article class="news-card">
+        <div class="desk-head">
+          <div>
+            <div class="symbol">${esc(item.ticker)}</div>
+            <div class="title">${esc(item.company_name || item.ticker)}</div>
+          </div>
+          <div class="pills">
+            <span class="soft-pill ${deltaClass(item.display_change_pct)}">${esc(sessionLabel(item.extended_session))} ${fmtPercent(item.display_change_pct)}</span>
+            <span class="soft-pill">${esc(item.sector || 'S&P 500')}</span>
+          </div>
+        </div>
+        <a class="headline-link news-card-title" href="${esc(item.url || '#')}" target="_blank" rel="noreferrer">${esc(item.title || 'Headline')}</a>
+        <div class="news-meta">
+          <span class="soft-pill">${esc(item.source || 'Verified headline')}</span>
+          <span class="soft-pill">${fmtDateTime(item.published_at)}</span>
+          <span class="soft-pill">${fmtPrice(item.display_price)}</span>
+          <span class="soft-pill">${fmtRvol(item.rvol)}</span>
+        </div>
+        <div class="news-summary">${esc(item.summary || 'Verified headline returned without a publisher summary.')}</div>
+        <div class="news-footer">
+          <div class="tiny-copy">${esc(item.sub_industry || 'S&P 500 constituent')}</div>
+          <div class="news-actions">
+            <button class="small-btn" data-open-desk="${esc(item.ticker)}">Open Chart Desk</button>
+            <a class="small-btn news-link-btn" href="${esc(item.url || '#')}" target="_blank" rel="noreferrer">Read Source</a>
+          </div>
+        </div>
+      </article>
+    `;
+  }
+
+  function renderNewsTab() {
+    const news = state.news;
+    const summary = news?.summary || {};
+    const items = news?.items || [];
+
+    const summaryHtml = state.loading.news && !news
+      ? emptyState('Loading the latest verified S&P 500 headlines...')
+      : state.errors.news
+        ? errorState(state.errors.news)
+        : `
+          <div class="metrics-4">
+            <div class="metric-card"><div class="metric-label">Verified Headlines</div><div class="metric-value">${summary.rendered_count ?? '--'}</div><div class="metric-copy">Only names with a verified stock-specific headline make this board.</div></div>
+            <div class="metric-card"><div class="metric-label">Coverage Pool</div><div class="metric-value">${summary.candidate_count ?? '--'}</div><div class="metric-copy">S&amp;P 500 names scanned for headline matches.</div></div>
+            <div class="metric-card"><div class="metric-label">Sectors Represented</div><div class="metric-value">${summary.sectors_represented ?? '--'}</div><div class="metric-copy">How broad the current verified-news spread is.</div></div>
+            <div class="metric-card"><div class="metric-label">Biggest Move with News</div><div class="metric-value">${esc(summary.biggest_move_with_news || '--')}</div><div class="metric-copy">${summary.latest_headline_at ? `Freshest headline ${fmtDateTime(summary.latest_headline_at)}` : 'Awaiting a fresh verified headline.'}</div></div>
+          </div>
+        `;
+
+    const cardsHtml = state.loading.news && !news
+      ? emptyState('Loading verified headlines...')
+      : state.errors.news && !items.length
+        ? errorState(state.errors.news)
+        : items.map((item) => renderNewsCard(item)).join('') || emptyState('No verified S&P 500 headlines were returned right now. Try refreshing in a few minutes.');
+
+    return `
+      <div class="main-stack">
+        <section class="panel section">
+          <div class="section-head">
+            <div>
+              <div class="section-kicker">Latest Verified News</div>
+              <h2>S&amp;P 500 names with fresh, matched headlines</h2>
+              <p>Toggle over from the heatmap to see the newest verified headlines tied to real S&amp;P 500 stocks, together with their live move, sector, and a fast path into the chart desk.</p>
+            </div>
+            <button class="action-btn" data-refresh="news">Refresh News</button>
+          </div>
+          ${summaryHtml}
+        </section>
+        <section class="news-grid">
+          ${cardsHtml}
+        </section>
+      </div>
+    `;
+  }
+
   function renderChartTab() {
     const workspace = state.chartWorkspace;
     const detail = workspace?.detail || {};
@@ -1425,6 +1679,8 @@
   }
 
   function renderActiveTab() {
+    if (state.activeTab === 'heatmap') return renderHeatmapTab();
+    if (state.activeTab === 'news') return renderNewsTab();
     if (state.activeTab === 'premarket') return renderPremarketTab();
     if (state.activeTab === 'postmarket') return renderPostmarketTab();
     if (state.activeTab === 'themes') return renderThemesTab();
@@ -1594,6 +1850,36 @@
       render();
     }
   }
+  async function loadHeatmap(force = false) {
+    if (state.loading.heatmap && !force) return;
+    state.loading.heatmap = true;
+    state.errors.heatmap = '';
+    render();
+    try {
+      state.heatmap = await api('/api/sp500-heatmap');
+    } catch (error) {
+      console.error(error);
+      state.errors.heatmap = 'Unable to load the live S&P 500 heatmap right now.';
+    } finally {
+      state.loading.heatmap = false;
+      render();
+    }
+  }
+  async function loadNews(force = false) {
+    if (state.loading.news && !force) return;
+    state.loading.news = true;
+    state.errors.news = '';
+    render();
+    try {
+      state.news = await api('/api/sp500-news?limit=18');
+    } catch (error) {
+      console.error(error);
+      state.errors.news = 'Unable to load the verified S&P 500 news board right now.';
+    } finally {
+      state.loading.news = false;
+      render();
+    }
+  }
   async function loadChartWorkspace(symbol, force = false) {
     const clean = String(symbol || state.chartSymbol || '').trim().toUpperCase();
     if (!clean) return;
@@ -1620,6 +1906,8 @@
     if (tabButton) {
       state.activeTab = tabButton.dataset.tab;
       render();
+      if (state.activeTab === 'heatmap' && !state.heatmap) loadHeatmap();
+      if (state.activeTab === 'news' && !state.news) loadNews();
       if (state.activeTab === 'premarket' && !state.premarket) loadPremarket();
       if (state.activeTab === 'postmarket' && !state.postmarket) loadPostmarket();
       if (state.activeTab === 'monitor' && !state.monitor) loadMonitor();
@@ -1639,6 +1927,8 @@
       if (target === 'rrg') loadRrg(true);
       if (target === 'earnings') loadEarnings(true);
       if (target === 'monitor') loadMonitor(true);
+      if (target === 'heatmap') loadHeatmap(true);
+      if (target === 'news') loadNews(true);
       return;
     }
 
@@ -1713,6 +2003,8 @@
     window.setInterval(() => loadRrg(true), RRG_REFRESH_MS);
     window.setInterval(() => { if (state.earnings) loadEarnings(true); }, AUTO_REFRESH_MS);
     window.setInterval(() => { if (state.monitor) loadMonitor(true); }, AUTO_REFRESH_MS);
+    window.setInterval(() => { if (state.heatmap) loadHeatmap(true); }, AUTO_REFRESH_MS);
+    window.setInterval(() => { if (state.news) loadNews(true); }, AUTO_REFRESH_MS);
     window.setInterval(() => loadBrief(true), AUTO_REFRESH_MS);
   }
 

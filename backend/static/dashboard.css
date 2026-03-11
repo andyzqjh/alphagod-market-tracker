@@ -258,16 +258,167 @@ a { color: inherit; }
 }
 .sub-grid { display: grid; gap: 14px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .section-gap { display: grid; gap: 22px; }
+.heatmap-sidecar, .heatmap-sectors, .news-grid {
+  display: grid;
+  gap: 22px;
+}
+.heatmap-sidecar,
+.news-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.heatmap-sectors {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.heatmap-sector-card {
+  min-width: 0;
+}
+.heatmap-sector-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+.heatmap-sector-head h2 {
+  margin: 10px 0 0;
+  font-size: 1.45rem;
+  letter-spacing: -0.03em;
+}
+.heatmap-sector-head p {
+  margin: 10px 0 0;
+  color: var(--muted);
+}
+.heatmap-grid {
+  display: grid;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  grid-auto-rows: minmax(86px, auto);
+  gap: 10px;
+}
+.heatmap-tile,
+.heatmap-mini-row {
+  width: 100%;
+  text-align: left;
+  color: var(--text);
+  cursor: pointer;
+}
+.heatmap-tile {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 14px;
+  border-radius: 18px;
+  border: 1px solid rgba(20,38,58,0.08);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.16);
+}
+.heatmap-tile.lg {
+  grid-column: span 4;
+  grid-row: span 2;
+}
+.heatmap-tile.md {
+  grid-column: span 3;
+  grid-row: span 2;
+}
+.heatmap-tile.sm {
+  grid-column: span 3;
+}
+.heatmap-tile.xs {
+  grid-column: span 2;
+}
+.heatmap-topline,
+.heatmap-bottomline,
+.news-meta,
+.news-footer,
+.news-actions {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.heatmap-session {
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: rgba(255,255,255,0.42);
+  border: 1px solid rgba(20,38,58,0.08);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+.heatmap-company {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+  min-height: 32px;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.heatmap-price {
+  font-size: 1.3rem;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+}
+.heatmap-mini-list {
+  display: grid;
+  gap: 10px;
+}
+.heatmap-mini-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+  padding: 12px 14px;
+  border-radius: 16px;
+  border: 1px solid rgba(20,38,58,0.08);
+  background: rgba(255,255,255,0.72);
+}
+.news-card {
+  padding: 20px;
+  border-radius: 22px;
+  background: rgba(255,255,255,0.78);
+  border: 1px solid rgba(20,38,58,0.08);
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+}
+.news-card-title {
+  display: inline-block;
+  font-size: 1.2rem;
+  font-weight: 700;
+  line-height: 1.4;
+}
+.news-summary {
+  color: var(--muted);
+  line-height: 1.7;
+}
+.news-link-btn {
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
 @media (max-width: 1320px) {
-  .split, .chart-layout, .theme-boards { grid-template-columns: 1fr; }
+  .split, .chart-layout, .theme-boards, .heatmap-sectors { grid-template-columns: 1fr; }
   .theme-grid, .theme-heat-grid { grid-template-columns: 1fr; }
   .quote-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (max-width: 980px) {
-  .metrics-3, .metrics-4, .metrics-5, .quote-grid, .detail-grid, .summary-flow, .chart-stats, .quote-footer, .sub-grid, .theme-heat-grid { grid-template-columns: 1fr; }
+  .metrics-3, .metrics-4, .metrics-5, .quote-grid, .detail-grid, .summary-flow, .chart-stats, .quote-footer, .sub-grid, .theme-heat-grid, .heatmap-sidecar, .news-grid { grid-template-columns: 1fr; }
+  .heatmap-grid { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+  .heatmap-tile.lg, .heatmap-tile.md, .heatmap-tile.sm { grid-column: span 3; }
+  .heatmap-tile.xs { grid-column: span 2; }
 }
 @media (max-width: 720px) {
   .app-shell { padding: 14px 10px 26px; }
   .hero, .section { padding: 18px; }
   .hero h1 { font-size: 2.2rem; }
+  .heatmap-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .heatmap-tile.lg,
+  .heatmap-tile.md,
+  .heatmap-tile.sm,
+  .heatmap-tile.xs { grid-column: span 2; }
 }

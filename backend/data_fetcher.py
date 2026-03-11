@@ -1132,6 +1132,9 @@ def get_earnings_tracker(days_ahead: int = 21, limit: int = 120, lookback_days: 
     }
 
 
+EASTERN_TZ = ZoneInfo('America/New_York')
+
+
 def _session_field_name(session: str) -> str:
     return 'pre_market_change_pct' if str(session).lower() == 'pre' else 'post_market_change_pct'
 
@@ -1142,6 +1145,159 @@ def _session_price_name(session: str) -> str:
 
 def _session_label(session: str) -> str:
     return 'Pre-market' if str(session).lower() == 'pre' else 'Post-market'
+
+
+def _session_minutes_mask(index: pd.DatetimeIndex, session: str):
+    minutes = index.hour * 60 + index.minute
+    if str(session).lower() == 'pre':
+        return (minutes >= 240) & (minutes < 570)
+    return (minutes >= 960) & (minutes < 1200)
+
+
+def _regular_minutes_mask(index: pd.DatetimeIndex):
+    minutes = index.hour * 60 + index.minute
+    return (minutes >= 570) & (minutes < 960)
+
+
+def _fetch_extended_intraday_frame(symbol: str) -> pd.DataFrame:
+    try:
+        data = _request_json(
+            YAHOO_CHART_URL.format(symbol=url_quote(symbol, safe='')),
+            params={
+                'range': '2d',
+                'interval': '5m',
+                'includePrePost': 'true',
+                'events': 'div,splits',
+            },
+        )
+        result = data.get('chart', {}).get('result') or []
+        if not result:
+            return pd.DataFrame()
+
+        payload = result[0]
+        timestamps = payload.get('timestamp') or []
+        quotes = payload.get('indicators', {}).get('quote', [{}])[0]
+        if not timestamps or not quotes:
+            return pd.DataFrame()
+
+        count = min(
+            len(timestamps),
+            len(quotes.get('open', timestamps)),
+            len(quotes.get('high', timestamps)),
+            len(quotes.get('low', timestamps)),
+            len(quotes.get('close', timestamps)),
+            len(quotes.get('volume', timestamps)),
+        )
+        if count == 0:
+            return pd.DataFrame()
+
+        frame = pd.DataFrame({
+            'open': quotes.get('open', [])[:count],
+            'high': quotes.get('high', [])[:count],
+            'low': quotes.get('low', [])[:count],
+            'close': quotes.get('close', [])[:count],
+            'volume': quotes.get('volume', [])[:count],
+        })
+        frame['adjclose'] = frame['close']
+        frame.index = pd.to_datetime(timestamps[:count], unit='s', utc=True).tz_convert(EASTERN_TZ)
+        frame = frame.apply(pd.to_numeric, errors='coerce').dropna(subset=['close']).sort_index()
+        return frame
+    except Exception:
+        return pd.DataFrame()
+
+
+def _previous_regular_close(frame: pd.DataFrame, session: str, session_date) -> Optional[float]:
+    if frame.empty:
+        return None
+    regular = frame[_regular_minutes_mask(frame.index)]
+    if regular.empty:
+        return None
+
+    if str(session).lower() == 'pre':
+        prior = regular[regular.index.date < session_date]
+        if prior.empty:
+            return None
+        return _safe_float(prior['close'].iloc[-1])
+
+    same_day = regular[regular.index.date == session_date]
+    if not same_day.empty:
+        return _safe_float(same_day['close'].iloc[-1])
+
+    prior = regular[regular.index.date < session_date]
+    if prior.empty:
+        return None
+    return _safe_float(prior['close'].iloc[-1])
+
+
+def _fetch_session_snapshot(symbol: str, session: str) -> Optional[dict]:
+    frame = _fetch_extended_intraday_frame(symbol)
+    if frame.empty:
+        return None
+
+    now_et = datetime.now(timezone.utc).astimezone(EASTERN_TZ)
+    session_rows = frame[_session_minutes_mask(frame.index, session)]
+    session_rows = session_rows[session_rows.index.date == now_et.date()]
+    if session_rows.empty:
+        return None
+
+    session_price = _safe_float(session_rows['close'].iloc[-1])
+    prev_close = _previous_regular_close(frame, session, now_et.date())
+    if session_price is None or prev_close in (None, 0):
+        return None
+
+    session_pct = ((session_price - prev_close) / prev_close) * 100
+    session_volume = _safe_int(session_rows['volume'].fillna(0).sum())
+    return {
+        'symbol': symbol,
+        'session_price': _round_number(session_price),
+        'session_pct': _round_number(session_pct),
+        'session_volume': session_volume,
+        'previous_close': _round_number(prev_close),
+    }
+
+
+def _batch_fetch_session_snapshots(symbols: List[str], session: str) -> dict:
+    snapshot_map = {}
+    if not symbols:
+        return snapshot_map
+
+    with ThreadPoolExecutor(max_workers=min(len(symbols), 10)) as executor:
+        futures = {executor.submit(_fetch_session_snapshot, symbol, session): symbol for symbol in symbols}
+        for future in as_completed(futures):
+            symbol = futures[future]
+            try:
+                result = future.result()
+            except Exception as exc:
+                LOGGER.warning('Extended session fetch failed for %s: %s', symbol, exc)
+                continue
+            if result:
+                snapshot_map[symbol] = result
+    return snapshot_map
+
+
+def _session_grade(item: dict, detail: dict) -> str:
+    score = 0
+    session_pct = abs(item.get('session_pct') or 0)
+    short_interest = detail.get('short_interest') or 0
+    if session_pct >= 15:
+        score += 2
+    elif session_pct >= 8:
+        score += 1
+
+    if short_interest >= 15:
+        score += 1
+    if item.get('event_label') in ('Earnings / Guidance', 'Margin / Mix', 'Contract / Commercial', 'Regulatory / Clinical'):
+        score += 1
+    if (item.get('session_rvol') or 0) >= 1.5:
+        score += 1
+
+    if score >= 4:
+        return 'A'
+    if score == 3:
+        return 'B'
+    if score == 2:
+        return 'C'
+    return 'D'
 
 
 def _perception_before(detail: dict) -> str:
@@ -1244,20 +1400,35 @@ def get_session_movers(session: str = 'pre', min_move: float = 0.5, limit: int =
     from news_fetcher import get_stock_news
 
     session = 'pre' if str(session).lower() != 'post' else 'post'
-    pct_field = _session_field_name(session)
-    price_field = _session_price_name(session)
     tracked_universe = list(dict.fromkeys(STOCK_UNIVERSE + [ticker for tickers in THEMES.values() for ticker in tickers]))
     quotes = _batch_fetch_quotes(tracked_universe)
 
+    priority_symbols = sorted(
+        tracked_universe,
+        key=lambda symbol: (
+            -(_safe_int((quotes.get(symbol) or {}).get('average_volume')) or 0),
+            -(_safe_float((quotes.get(symbol) or {}).get('market_cap')) or 0),
+        ),
+    )[:160]
+    extended_map = _batch_fetch_session_snapshots(priority_symbols, session)
+
     candidates = []
     for ticker in tracked_universe:
-        quote_data = quotes.get(ticker)
-        if not quote_data:
-            continue
-        session_pct = quote_data.get(pct_field)
-        session_price = quote_data.get(price_field)
+        quote_data = quotes.get(ticker) or {}
+        extended = extended_map.get(ticker) or {}
+        session_pct = extended.get('session_pct')
+        if session_pct is None:
+            session_pct = quote_data.get(_session_field_name(session))
+        session_price = extended.get('session_price')
+        if session_price is None:
+            session_price = quote_data.get(_session_price_name(session))
+
         if session_pct is None or abs(session_pct) < min_move:
             continue
+
+        avg_volume = quote_data.get('average_volume')
+        session_volume = extended.get('session_volume')
+        session_rvol = round((session_volume or 0) / avg_volume, 2) if avg_volume else None
         candidates.append({
             'ticker': ticker,
             'company_name': quote_data.get('long_name') or ticker,
@@ -1265,11 +1436,13 @@ def get_session_movers(session: str = 'pre', min_move: float = 0.5, limit: int =
             'session_label': _session_label(session),
             'session_pct': _round_number(session_pct),
             'session_price': _round_number(session_price),
+            'session_volume': session_volume,
+            'session_rvol': session_rvol,
             'price': quote_data.get('price'),
             'change_pct': quote_data.get('change_pct'),
             'volume': quote_data.get('volume'),
-            'avg_volume': quote_data.get('average_volume'),
-            'rvol': round((quote_data.get('volume') or 0) / (quote_data.get('average_volume') or 1), 2) if quote_data.get('average_volume') else None,
+            'avg_volume': avg_volume,
+            'rvol': round((quote_data.get('volume') or 0) / (avg_volume or 1), 2) if avg_volume else None,
             'market_cap': quote_data.get('market_cap'),
             'themes': THEME_LOOKUP.get(ticker, []),
             'quote_status': 'available',
@@ -1295,7 +1468,13 @@ def get_session_movers(session: str = 'pre', min_move: float = 0.5, limit: int =
             'analyst_view': session_context.get('analyst_view'),
             'reasoning': session_context.get('reasoning'),
             'headline_summary': headlines[0].get('summary') if headlines else '',
+            'short_interest': detail.get('short_interest'),
+            'float_shares': detail.get('float_shares'),
+            'industry': detail.get('industry'),
+            'sector': detail.get('sector'),
+            'category': session_context.get('event_label'),
         })
+        item['grade'] = _session_grade(item, detail)
 
     leader_rows = [ticker_map[item['ticker']] for item in leaders if item['ticker'] in ticker_map]
     laggard_rows = [ticker_map[item['ticker']] for item in laggards if item['ticker'] in ticker_map]

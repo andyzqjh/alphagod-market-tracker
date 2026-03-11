@@ -905,33 +905,39 @@
             <thead>
               <tr>
                 <th>Ticker</th>
-                <th>Company</th>
                 <th>${label} %</th>
-                <th>${label} Price</th>
+                <th>${label} Vol</th>
+                <th>${label} RVol</th>
                 <th>1D %</th>
-                <th>Event</th>
-                <th>Perception Before</th>
-                <th>What Changed / Why It Matters</th>
-                <th>Market View Now</th>
-                <th></th>
+                <th>Short Interest</th>
+                <th>Float</th>
+                <th>Industry</th>
+                <th>Category</th>
+                <th>Grade</th>
+                <th>Reasoning</th>
+                <th>Analysis Details</th>
               </tr>
             </thead>
             <tbody>
               ${rows.map((item) => `
                 <tr>
                   <td><button class="chip-btn clicker mono" data-open-desk="${esc(item.ticker)}">${esc(item.ticker)}</button></td>
-                  <td>${esc(item.company_name || item.ticker)}</td>
                   <td class="${deltaClass(item.session_pct)}">${fmtPercent(item.session_pct)}</td>
-                  <td>${fmtPrice(item.session_price)}</td>
+                  <td>${fmtVolume(item.session_volume)}</td>
+                  <td>${item.session_rvol != null ? `${item.session_rvol.toFixed(2)}x` : 'n/a'}</td>
                   <td class="${deltaClass(item.change_pct)}">${fmtPercent(item.change_pct)}</td>
-                  <td>
-                    <div>${esc(item.event_label || 'Narrative')}</div>
-                    <div class="tiny-copy">${esc(item.headline_title || 'No fresh headline')}</div>
+                  <td>${item.short_interest != null ? `${item.short_interest.toFixed(2)}%` : 'n/a'}</td>
+                  <td>${item.float_shares != null ? fmtVolume(item.float_shares) : 'n/a'}</td>
+                  <td>${esc(item.industry || item.company_name || item.ticker)}</td>
+                  <td><span class="soft-pill">${esc(item.category || item.event_label || 'Narrative')}</span></td>
+                  <td><span class="soft-pill ${item.grade === 'A' ? 'pos' : item.grade === 'D' ? 'neg' : 'warn'}">${esc(item.grade || 'C')}</span></td>
+                  <td style="min-width:360px; color: var(--muted);">${esc(item.reasoning || item.what_changed || 'n/a')}</td>
+                  <td style="min-width:320px; color: var(--muted);">
+                    <div>${esc(item.perception_before || 'n/a')}</div>
+                    <div style="margin-top:8px;">${esc(item.what_changed || 'n/a')}</div>
+                    <div style="margin-top:8px;">${esc(item.market_view || item.analyst_view || 'n/a')}</div>
+                    <div style="margin-top:10px;"><button class="small-btn" data-open-desk="${esc(item.ticker)}">Open Chart Desk</button></div>
                   </td>
-                  <td style="min-width:230px; color: var(--muted);">${esc(item.perception_before || 'n/a')}</td>
-                  <td style="min-width:320px; color: var(--muted);">${esc(item.what_changed || item.reasoning || 'n/a')}</td>
-                  <td style="min-width:240px; color: var(--muted);">${esc(item.market_view || item.analyst_view || 'n/a')}</td>
-                  <td><button class="small-btn" data-open-desk="${esc(item.ticker)}">Chart Desk</button></td>
                 </tr>
               `).join('')}
             </tbody>

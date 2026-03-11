@@ -2006,6 +2006,14 @@
     window.setInterval(() => { if (state.heatmap) loadHeatmap(true); }, AUTO_REFRESH_MS);
     window.setInterval(() => { if (state.news) loadNews(true); }, AUTO_REFRESH_MS);
     window.setInterval(() => loadBrief(true), AUTO_REFRESH_MS);
+    window.setTimeout(() => {
+      if (state.heatmap || state.loading.heatmap) return;
+      loadHeatmap().then(() => {
+        if (!state.news && !state.loading.news) {
+          loadNews();
+        }
+      });
+    }, 1500);
   }
 
   boot();

@@ -508,21 +508,39 @@ Rules:
 def _fallback_earnings_brief(earnings_tracker: dict) -> dict:
     items = earnings_tracker.get('items', [])
     summary = earnings_tracker.get('summary', {})
-    top_names = items[:5]
+    recent_items = [item for item in items if item.get('status') == 'Recent']
+    upcoming_items = [item for item in items if item.get('status') in ('Today', 'Upcoming')]
+    top_names = upcoming_items[:5] or items[:5]
     strongest = sorted(items, key=lambda item: item.get('change_pct') or 0, reverse=True)[:4]
     weakest = sorted(items, key=lambda item: item.get('change_pct') or 0)[:4]
+    today_items = [item for item in items if item.get('status') == 'Today']
+    today_bmo = [item.get('ticker') for item in today_items if item.get('report_time') == 'BMO'][:4]
+    today_amc = [item.get('ticker') for item in today_items if item.get('report_time') == 'AMC'][:4]
+    leaning_names = sorted(
+        [item for item in upcoming_items if item.get('change_pct') is not None],
+        key=lambda item: abs(item.get('change_pct') or 0),
+        reverse=True,
+    )[:4]
+    post_print_dispersion = sorted(
+        [item for item in recent_items if item.get('change_pct') is not None],
+        key=lambda item: abs(item.get('change_pct') or 0),
+        reverse=True,
+    )[:4]
 
     theme_counts = {}
     for item in items:
         for theme in item.get('themes', []):
             theme_counts[theme] = theme_counts.get(theme, 0) + 1
     top_themes = sorted(theme_counts.items(), key=lambda pair: pair[1], reverse=True)[:5]
+    theme_text = ', '.join(theme for theme, _ in top_themes) or 'no clear theme concentration yet'
+    bmo_text = ', '.join(today_bmo) or 'none'
+    amc_text = ', '.join(today_amc) or 'none'
 
     return {
-        'headline': 'Recent and upcoming U.S. earnings are clustering in the tracked liquid-stock universe.',
-        'summary': f"There are {summary.get('total_events', 0)} earnings events in the current tracker, with {summary.get('recent_count', 0)} recent prints, {summary.get('today_count', 0)} due today, and {summary.get('next_7_days', 0)} more scheduled over the next week. The nearest names on the calendar are {', '.join(item.get('ticker', 'n/a') for item in top_names) or 'not available yet'}.",
-        'focus': f"Traders should focus on where earnings are concentrated by theme and whether price is already leaning into the print. Current leaders around earnings are {_join_moves(strongest, 'ticker', 'change_pct', limit=4)}, while weaker setups include {_join_moves(weakest, 'ticker', 'change_pct', limit=4)}.",
-        'themes': f"The earnings slate is most connected to these tracked themes: {', '.join(theme for theme, _ in top_themes) or 'no clear theme concentration yet'}. That matters because a strong report can spill into peers and ETFs tied to the same narrative.",
+        'headline': 'The earnings calendar is active enough that traders should treat it like a catalyst map, not just a date list.',
+        'summary': f"There are {summary.get('total_events', 0)} earnings events in the current tracker, with {summary.get('recent_count', 0)} recent prints, {summary.get('today_count', 0)} due today, and {summary.get('next_7_days', 0)} more scheduled over the next week. The nearest names on deck are {', '.join(item.get('ticker', 'n/a') for item in top_names) or 'not available yet'}, with today's before-the-open names at {bmo_text} and after-the-close names at {amc_text}.",
+        'focus': f"The setups already leaning hardest into earnings are {_join_moves(leaning_names, 'ticker', 'change_pct', limit=4)}. The biggest post-print reactions so far are {_join_moves(post_print_dispersion, 'ticker', 'change_pct', limit=4)}, so traders should watch whether the next reports confirm momentum or fade once expectations are tested.",
+        'themes': f"The current slate clusters most around {theme_text}. That matters because a strong or weak report can spill over into peers, sector baskets, and the narrative complex tied to the same theme.",
         'risk': 'The main risk is that crowded names are already pricing in good news, which raises the odds of post-print reversals even on decent numbers. Watch whether implied expectations look too high versus the current tape.'
     }
 
@@ -536,7 +554,7 @@ Earnings tracker summary:
 {json.dumps(earnings_tracker.get('summary', {}), ensure_ascii=False)}
 
 Recent and upcoming earnings rows:
-{json.dumps(earnings_tracker.get('items', [])[:20], ensure_ascii=False)}
+{json.dumps(earnings_tracker.get('items', [])[:30], ensure_ascii=False)}
 
 Return ONLY valid JSON with this exact structure:
 {{
@@ -551,8 +569,12 @@ Rules:
 - Speak like a trader, not a textbook.
 - Focus on concentration, expectations, and where the biggest reactions may happen.
 - Mention when price action suggests names may already be leaning into the print.
+- Call out if the busiest names are before the open or after the close.
+- Explain what recent price reaction is saying about expectations, not just the dates.
 - Include both recent and upcoming earnings context if available.
 - Return JSON only."""
 
     result = _call_json(prompt, fallback, max_tokens=900)
-    return _merge_with_fallback(fallback, result)
+    merged = _merge_with_fallback(fallback, result)
+    merged.pop('error', None)
+    return merged

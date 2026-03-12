@@ -335,17 +335,21 @@
       + '&theme=dark&style=1&timezone=America%2FNew_York&withdateranges=1&hideideas=1&locale=en';
   }
 
-  async function api(path) {
+  async function api(path, timeoutMs = 15000) {
     let lastError = null;
     for (const base of API_BASE_CANDIDATES) {
+      const controller = new AbortController();
+      const timer = window.setTimeout(() => controller.abort(new Error(`Timeout: ${path}`)), timeoutMs);
       try {
-        const response = await fetch(`${base}${path}`, { cache: 'no-store' });
+        const response = await fetch(`${base}${path}`, { cache: 'no-store', signal: controller.signal });
+        window.clearTimeout(timer);
         if (!response.ok) {
           lastError = new Error(`Request failed: ${path}`);
           continue;
         }
         return response.json();
       } catch (error) {
+        window.clearTimeout(timer);
         lastError = error;
       }
     }
@@ -1184,7 +1188,8 @@
                   <td><button class="chip-btn clicker mono" data-open-desk="${esc(item.ticker)}">${esc(item.ticker)}</button></td>
                   <td style="min-width:340px;">
                     ${item.headline_url ? `<a class="headline-link" href="${esc(item.headline_url)}" target="_blank" rel="noreferrer">${esc(item.headline_title || 'No verified catalyst')}</a>` : `<div>${esc(item.headline_title || 'No verified catalyst')}</div>`}
-                    <div class="tiny-copy" style="margin-top:8px;">${esc(item.headline_label || item.headline_source || 'No verified catalyst')}</div>
+                    <div class="tiny-copy" style="margin-top:8px;">${esc(item.headline_label || item.headline_source || 'No verified catalyst')}${item.news_quality ? ` | ${esc(item.news_quality)} confidence` : ''}</div>
+                    ${item.headline_summary ? `<div style="margin-top:8px; color: var(--muted);">${esc(item.headline_summary)}</div>` : ''}
                   </td>
                   <td class="${deltaClass(item.session_pct)}">${fmtPercent(item.session_pct)}</td>
                   <td>${fmtVolume(item.session_volume)}</td>
@@ -1195,7 +1200,7 @@
                   <td>${esc(item.industry || item.company_name || item.ticker)}</td>
                   <td><span class="soft-pill">${esc(item.category || item.event_label || 'Narrative')}</span></td>
                   <td><span class="soft-pill ${item.grade === 'A' ? 'pos' : item.grade === 'D' ? 'neg' : 'warn'}">${esc(item.grade || 'C')}</span></td>
-                  <td style="min-width:360px; color: var(--muted);">${esc(item.reasoning || 'n/a')}</td>
+                  <td style="min-width:360px; color: var(--muted);">${esc(item.reasoning || item.what_changed || 'n/a')}</td>
                   <td style="min-width:360px;">
                     <div class="analysis-stack">
                       ${renderAnalysisBlocks(item.analysis_blocks)}
@@ -1987,7 +1992,7 @@
     state.errors.premarket = '';
     render();
     try {
-      state.premarket = await api('/api/session-movers/pre?min_move=0.5&limit=15');
+      state.premarket = await api('/api/session-movers/pre?min_move=0.5&limit=15', 12000);
     } catch (error) {
       console.error(error);
       state.errors.premarket = 'Unable to load the pre-market movers right now.';
@@ -2003,7 +2008,7 @@
     state.errors.postmarket = '';
     render();
     try {
-      state.postmarket = await api('/api/session-movers/post?min_move=0.5&limit=15');
+      state.postmarket = await api('/api/session-movers/post?min_move=0.5&limit=15', 12000);
     } catch (error) {
       console.error(error);
       state.errors.postmarket = 'Unable to load the post-market movers right now.';
@@ -2018,7 +2023,7 @@
     state.errors.earnings = '';
     render();
     try {
-      state.earnings = await api('/api/earnings-tracker');
+      state.earnings = await api('/api/earnings-tracker', 12000);
     } catch (error) {
       console.error(error);
       state.errors.earnings = 'Unable to load the earnings tracker right now.';

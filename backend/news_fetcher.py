@@ -1,15 +1,17 @@
+import html
 import re
 import time
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import List, Optional
+from urllib.parse import urlparse
 from xml.etree import ElementTree
 
 import requests
 import yfinance as yf
 
 HEADERS = {'User-Agent': 'StockDashboard/1.0 (personal use)'}
-REQUEST_TIMEOUT = 10
+REQUEST_TIMEOUT = 12
 YAHOO_SEARCH_URL = 'https://query1.finance.yahoo.com/v1/finance/search'
 GOOGLE_NEWS_URL = 'https://news.google.com/rss/search'
 COMPANY_SUFFIX_TOKENS = {
@@ -26,13 +28,45 @@ LOW_SIGNAL_HEADLINE_PATTERN = re.compile(
     r'futures fall|live:|roundup|recap|wallstreetbets|movers:|stock market today)',
     re.IGNORECASE,
 )
+DOMAIN_SOURCE_MAP = {
+    'finance.yahoo.com': 'Yahoo Finance',
+    'fool.com': 'The Motley Fool',
+    'nasdaq.com': 'Nasdaq',
+    'benzinga.com': 'Benzinga',
+    'businesswire.com': 'Business Wire',
+    'globenewswire.com': 'GlobeNewswire',
+    'seekingalpha.com': 'Seeking Alpha',
+    'investors.com': "Investor's Business Daily",
+    'marketwatch.com': 'MarketWatch',
+    'investing.com': 'Investing.com',
+    'prnewswire.com': 'PR Newswire',
+    'zacks.com': 'Zacks',
+}
 
 SESSION = requests.Session()
 SESSION.headers.update(HEADERS)
 
 
+def _clean_text(value) -> str:
+    if value is None:
+        return ''
+    text = html.unescape(str(value))
+    text = re.sub(r'<[^>]+>', ' ', text)
+    text = re.sub(r'\s+', ' ', text)
+    return text.strip()
+
+
+def _trim_text(value, limit: int = 420) -> str:
+    text = _clean_text(value)
+    if len(text) <= limit:
+        return text
+    clipped = text[:limit - 3].rsplit(' ', 1)[0].rstrip(' ,;:')
+    return (clipped or text[:limit - 3]).rstrip() + '...'
+
+
 def _normalize_text(value: str) -> str:
-    return re.sub(r'\s+', ' ', re.sub(r'[^a-z0-9]+', ' ', str(value or '').lower().replace('&', ' and '))).strip()
+    cleaned = _clean_text(value).lower().replace('&', ' and ')
+    return re.sub(r'\s+', ' ', re.sub(r'[^a-z0-9]+', ' ', cleaned)).strip()
 
 
 def _strip_company_suffixes(tokens: List[str]) -> List[str]:
@@ -54,6 +88,18 @@ def _contains_ticker_mention(text: str, symbol: str) -> bool:
     if not symbol:
         return False
     return re.search(rf'(^|[^A-Za-z0-9])\$?{re.escape(symbol)}(?=$|[^A-Za-z0-9])', str(text or ''), re.IGNORECASE) is not None
+
+
+def _source_from_url(url: str) -> str:
+    host = urlparse(url or '').netloc.lower().removeprefix('www.')
+    if not host:
+        return 'News feed'
+    for suffix, label in DOMAIN_SOURCE_MAP.items():
+        if host.endswith(suffix):
+            return label
+    parts = host.split('.')
+    core = parts[-2] if len(parts) >= 2 else parts[0]
+    return core.replace('-', ' ').title()
 
 
 def _build_company_matcher(company_name: str) -> dict:
@@ -128,13 +174,15 @@ def _resolve_company_name(ticker: str, company_name: Optional[str]) -> str:
 
 
 def _analyze_headline_entity(item: dict, symbol: str, company_name: str) -> dict:
-    title = str(item.get('title') or '')
+    title = _clean_text(item.get('title'))
+    summary = _clean_text(item.get('summary') or '')
+    combined_text = f'{title} {summary}'.strip()
     matcher = _build_company_matcher(company_name)
     related_tickers = [str(ticker).upper() for ticker in item.get('related_tickers') or []]
     ticker_in_title = _contains_ticker_mention(title, symbol)
     related_ticker_match = str(symbol or '').upper() in related_tickers
-    core_name_match = _contains_normalized_term(title, matcher['core_name']) if matcher['core_name'] else False
-    token_hits = sum(1 for token in matcher['distinctive_tokens'] if _contains_normalized_term(title, token))
+    core_name_match = _contains_normalized_term(combined_text, matcher['core_name']) if matcher['core_name'] else False
+    token_hits = sum(1 for token in matcher['distinctive_tokens'] if _contains_normalized_term(combined_text, token))
     requires_company_confirmation = len(str(symbol or '')) <= 3
 
     return {
@@ -148,8 +196,9 @@ def _analyze_headline_entity(item: dict, symbol: str, company_name: str) -> dict
 
 
 def _score_headline_match(item: dict, symbol: str, company_name: str) -> int:
-    title = str(item.get('title') or '')
-    lower_title = title.lower()
+    title = _clean_text(item.get('title'))
+    summary = _clean_text(item.get('summary') or '')
+    lower_text = f'{title} {summary}'.lower()
     entity = _analyze_headline_entity(item, symbol, company_name)
     score = 0
 
@@ -165,17 +214,19 @@ def _score_headline_match(item: dict, symbol: str, company_name: str) -> int:
         score += 3
     score += _score_headline_recency(item.get('published_at'))
 
-    if re.search(r'(earnings|guidance|beat|miss|revenue|eps|results|profit|outlook)', lower_title):
+    if re.search(r'(earnings|guidance|beat|miss|revenue|eps|results|profit|outlook)', lower_text):
         score += 4
-    if re.search(r'(upgrade|downgrade|target|initiat|buy from|price objective)', lower_title):
+    if re.search(r'(upgrade|downgrade|target|initiat|buy from|price objective)', lower_text):
         score += 3
-    if re.search(r'(fda|approval|designation|trial|study|phase|clinical)', lower_title):
+    if re.search(r'(fda|approval|designation|trial|study|phase|clinical)', lower_text):
         score += 4
-    if re.search(r'(deal|partnership|contract|investment|launch|order|acquisition|merger|stake|dividend)', lower_title):
+    if re.search(r'(deal|partnership|contract|investment|launch|order|acquisition|merger|stake|dividend)', lower_text):
         score += 4
     if LOW_SIGNAL_HEADLINE_PATTERN.search(title):
         score -= 8
-    if re.search(r'(stock is up today|signal more upside|what is|good stock to buy|wallstreetbets)', lower_title):
+    if re.search(r'(decreases stake|cuts holdings|boosts holdings|stock holdings|holdings in|holdings decreased|holds [0-9,]+ shares|acquires [0-9,]+ shares|sells [0-9,]+ shares|position in|institutional investors?)', lower_text):
+        score -= 6
+    if re.search(r'(stock is up today|signal more upside|what is|good stock to buy|wallstreetbets)', lower_text):
         score -= 4
 
     return score
@@ -208,6 +259,7 @@ def _normalize_yahoo_news(items: list, symbol: str, company_name: str) -> list:
 
         content = item.get('content') if isinstance(item.get('content'), dict) else {}
         click_through = item.get('clickThroughUrl') if isinstance(item.get('clickThroughUrl'), dict) else {}
+        url = item.get('link', '') or click_through.get('url', '')
         summary = (
             item.get('summary')
             or item.get('description')
@@ -219,13 +271,13 @@ def _normalize_yahoo_news(items: list, symbol: str, company_name: str) -> list:
         normalized_item = {
             'type': 'news',
             'ticker': symbol,
-            'title': item.get('title', ''),
-            'source': item.get('publisher', '') or 'Yahoo Finance',
-            'url': item.get('link', '') or click_through.get('url', ''),
+            'title': _clean_text(item.get('title', '')),
+            'source': item.get('publisher', '') or _source_from_url(url) or 'Yahoo Finance',
+            'url': url,
             'time': timestamp or 0,
             'published_at': published_at,
             'thumbnail': thumbnail,
-            'summary': summary[:420],
+            'summary': _trim_text(summary),
             'related_tickers': item.get('relatedTickers') or [],
         }
         normalized_item['match_score'] = _score_headline_match(normalized_item, symbol, company_name)
@@ -256,13 +308,13 @@ def _parse_google_news_feed(xml_text: str) -> list:
         published_at, timestamp = _parse_timestamp(item_node.findtext('pubDate'))
         items.append({
             'type': 'news',
-            'title': title,
+            'title': _clean_text(title),
             'source': source or 'Google News',
             'url': (item_node.findtext('link') or '').strip(),
             'published_at': published_at,
             'time': timestamp or 0,
             'thumbnail': '',
-            'summary': '',
+            'summary': _trim_text(item_node.findtext('description') or ''),
             'related_tickers': [],
         })
     return items
@@ -295,6 +347,67 @@ def _fetch_yahoo_search_news(symbol: str, company_name: str) -> list:
     return payload.get('news') or []
 
 
+def _parse_rss_feed(url: str, symbol: str) -> list:
+    try:
+        response = SESSION.get(url, timeout=REQUEST_TIMEOUT)
+        response.raise_for_status()
+        root = ElementTree.fromstring(response.text)
+    except Exception:
+        return []
+
+    items = []
+    for item_node in root.findall('./channel/item')[:24]:
+        title = item_node.findtext('title') or ''
+        link = item_node.findtext('link') or ''
+        if not title or not link:
+            continue
+        items.append({
+            'type': 'news',
+            'ticker': symbol,
+            'title': title,
+            'source': item_node.findtext('source') or _source_from_url(link),
+            'url': link,
+            'time': item_node.findtext('pubDate') or item_node.findtext('date') or 0,
+            'thumbnail': '',
+            'summary': item_node.findtext('description') or '',
+            'related_tickers': [],
+        })
+    return items
+
+
+def _fetch_yahoo_rss_news(symbol: str) -> list:
+    return _parse_rss_feed(
+        f'https://feeds.finance.yahoo.com/rss/2.0/headline?s={symbol}&region=US&lang=en-US',
+        symbol,
+    )
+
+
+def _fetch_nasdaq_rss_news(symbol: str) -> list:
+    return _parse_rss_feed(f'https://www.nasdaq.com/feed/rssoutbound?symbol={symbol}', symbol)
+
+
+def _normalize_feed_news(items: list, symbol: str, company_name: str) -> list:
+    normalized = []
+    for item in items:
+        published_at, timestamp = _parse_timestamp(item.get('time') or item.get('published_at'))
+        normalized_item = {
+            'type': 'news',
+            'ticker': symbol,
+            'title': _clean_text(item.get('title', '')),
+            'source': item.get('source') or _source_from_url(item.get('url', '')) or 'News feed',
+            'url': item.get('url', ''),
+            'time': timestamp or 0,
+            'published_at': published_at,
+            'thumbnail': item.get('thumbnail', ''),
+            'summary': _trim_text(item.get('summary') or ''),
+            'related_tickers': item.get('related_tickers') or [],
+        }
+        normalized_item['match_score'] = _score_headline_match(normalized_item, symbol, company_name)
+        normalized_item['verified'] = _is_verified_headline(normalized_item, symbol, company_name)
+        normalized.append(normalized_item)
+    return normalized
+
+
 def get_stock_news(ticker: str, company_name: Optional[str] = None, limit: int = 12) -> list:
     ticker = str(ticker or '').upper()
     if not ticker:
@@ -304,6 +417,7 @@ def get_stock_news(ticker: str, company_name: Optional[str] = None, limit: int =
     yahoo_items = []
     yahoo_search_items = []
     google_items = []
+    rss_items = []
 
     try:
         yahoo_items = yf.Ticker(ticker).news or []
@@ -320,7 +434,21 @@ def get_stock_news(ticker: str, company_name: Optional[str] = None, limit: int =
     except Exception:
         google_items = []
 
-    merged = _normalize_yahoo_news(yahoo_items + yahoo_search_items, ticker, company_name) + google_items
+    try:
+        rss_items.extend(_fetch_yahoo_rss_news(ticker))
+    except Exception:
+        pass
+
+    try:
+        rss_items.extend(_fetch_nasdaq_rss_news(ticker))
+    except Exception:
+        pass
+
+    merged = (
+        _normalize_yahoo_news(yahoo_items + yahoo_search_items, ticker, company_name)
+        + google_items
+        + _normalize_feed_news(rss_items, ticker, company_name)
+    )
     merged = [item for item in merged if item.get('title') and item.get('url') and not LOW_SIGNAL_HEADLINE_PATTERN.search(str(item.get('title') or ''))]
     merged.sort(key=lambda item: (
         0 if item.get('verified') else 1,
@@ -350,7 +478,7 @@ def get_stock_news(ticker: str, company_name: Optional[str] = None, limit: int =
             'time': item.get('time', 0),
             'published_at': item.get('published_at'),
             'thumbnail': item.get('thumbnail', ''),
-            'summary': (item.get('summary') or '')[:420],
+            'summary': _trim_text(item.get('summary') or '', limit=420),
             'verified': bool(item.get('verified')),
             'match_score': item.get('match_score'),
             'related_tickers': item.get('related_tickers') or [],
@@ -362,7 +490,7 @@ def get_stock_news(ticker: str, company_name: Optional[str] = None, limit: int =
 
 
 def get_reddit_posts(tickers: list) -> list:
-    """Get recent Reddit posts mentioning given tickers (no API key needed)"""
+    """Get recent Reddit posts mentioning given tickers (no API key needed)."""
     subs = ['wallstreetbets', 'stocks', 'investing', 'StockMarket']
     results = []
     for ticker in tickers[:6]:
@@ -376,7 +504,7 @@ def get_reddit_posts(tickers: list) -> list:
                 for post in posts:
                     data = post.get('data', {})
                     title = data.get('title', '')
-                    if ticker.upper() not in title.upper():
+                    if str(ticker).upper() not in title.upper():
                         continue
                     results.append({
                         'type': 'reddit',
@@ -387,7 +515,7 @@ def get_reddit_posts(tickers: list) -> list:
                         'comments': data.get('num_comments', 0),
                         'url': 'https://reddit.com' + data.get('permalink', ''),
                         'time': int(data.get('created_utc', 0)),
-                        'text': data.get('selftext', '')[:300],
+                        'text': _trim_text(data.get('selftext', ''), limit=300),
                     })
             except Exception:
                 pass

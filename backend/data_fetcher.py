@@ -1683,37 +1683,72 @@ def _fetch_single_earnings_event(ticker: str, start_dt: datetime, end_dt: dateti
 
 def _build_earnings_reasoning(event: dict, quote_data: dict, themes: List[str], now_dt: datetime) -> str:
     earnings_dt = event.get('earnings_date')
-    surprise_pct = event.get('surprise_pct')
-    change_pct = quote_data.get('change_pct')
-    price = quote_data.get('price')
+    surprise_pct = _safe_float(event.get('surprise_pct'))
+    eps_estimate = _safe_float(event.get('eps_estimate'))
+    reported_eps = _safe_float(event.get('reported_eps'))
+    change_pct = _safe_float(quote_data.get('change_pct'))
+    price = _safe_float(quote_data.get('price'))
     source_label = event.get('event_source_label') or 'Yahoo earnings feed'
+    report_time = event.get('report_time')
     theme_text = ', '.join(themes[:2]) if themes else 'the broader tape'
+    market_now = now_dt.astimezone(EASTERN_TZ)
+    days_until = None
+    if earnings_dt:
+        days_until = (earnings_dt.astimezone(EASTERN_TZ).date() - market_now.date()).days
 
     parts = []
-    if earnings_dt and earnings_dt.date() < now_dt.date():
-        if surprise_pct is not None:
-            if surprise_pct > 0:
-                parts.append(f'Recent results beat EPS by {surprise_pct:.2f}%, so traders are watching for post-earnings follow-through instead of a quick fade.')
-            elif surprise_pct < 0:
-                parts.append(f'Recent results missed EPS by {abs(surprise_pct):.2f}%, which keeps the focus on whether sellers still control the post-earnings tape.')
+    if days_until is not None and days_until < 0:
+        if surprise_pct is not None and surprise_pct > 0:
+            if change_pct is not None and change_pct < 0:
+                parts.append(f'The last print beat EPS by {surprise_pct:.2f}%, but price is still red, which usually means guidance, quality of beat, or crowded expectations are the real issue.')
             else:
-                parts.append('Recent results were close to expectations, so price reaction matters more than the raw print now.')
-        elif event.get('reported_eps') is not None:
-            parts.append(f'The report is already out with reported EPS at {event["reported_eps"]:.2f}, so traders are judging the market reaction rather than waiting for the catalyst.')
+                parts.append(f'The last print beat EPS by {surprise_pct:.2f}%, and the tape is still treating that report as a positive reset instead of a one-day pop.')
+        elif surprise_pct is not None and surprise_pct < 0:
+            if change_pct is not None and change_pct > 0:
+                parts.append(f'The last print missed EPS by {abs(surprise_pct):.2f}%, but the stock is holding up anyway, which suggests expectations had already reset or forward commentary mattered more than the miss.')
+            else:
+                parts.append(f'The last print missed EPS by {abs(surprise_pct):.2f}%, so traders are still watching for whether sellers keep control of the post-earnings tape.')
+        elif reported_eps is not None:
+            parts.append(f'The report is already out with reported EPS at {reported_eps:.2f}, so price reaction matters more now than the raw calendar event.')
         else:
-            parts.append('The earnings event recently hit the tape, so the main question is whether the market is accepting the result or still repricing it.')
+            parts.append('The earnings event recently hit the tape, so the key read is whether the market is accepting the result or still repricing the story.')
     else:
-        if event.get('eps_estimate') is not None:
-            parts.append(f'The next report is on deck with Street EPS estimate at {event["eps_estimate"]:.2f}, so traders will watch whether price is leaning into the print too early.')
+        if days_until == 0:
+            timing_text = 'today'
+            if report_time == 'BMO':
+                timing_text = 'today before the open'
+            elif report_time == 'AMC':
+                timing_text = 'today after the close'
+            elif report_time == 'TNS':
+                timing_text = 'today with timing still not specific'
+            if eps_estimate is not None:
+                parts.append(f'The report is due {timing_text} with Street EPS estimate around {eps_estimate:.2f}, so traders will judge whether the setup was already leaning too bullish or too bearish into the print.')
+            else:
+                parts.append(f'The report is due {timing_text}, so the setup is about whether the stock is coiled for expansion or already priced for too much.')
+        elif eps_estimate is not None:
+            parts.append(f'The next report is on deck with Street EPS estimate at {eps_estimate:.2f}, so the real question is whether price is leaning into the print too early.')
         else:
-            parts.append('An earnings date is coming up, so the key setup question is whether the stock is coiling for expansion or already extended into the event.')
+            parts.append('An earnings date is coming up, so the setup question is whether the stock is coiling for expansion or already extended into the event.')
 
     if change_pct is not None and price is not None:
-        direction = 'up' if change_pct >= 0 else 'down'
-        parts.append(f'Shares are {direction} {abs(change_pct):.2f}% at about {price:.2f}, which gives a live read on how seriously the market is taking the setup.')
+        if days_until is not None and days_until >= 0:
+            if abs(change_pct) >= 6:
+                lean = 'bullishly' if change_pct > 0 else 'defensively'
+                parts.append(f'Price is already leaning {lean} into the event, with shares {("up" if change_pct >= 0 else "down")} {abs(change_pct):.2f}% at about {price:.2f}.')
+            elif abs(change_pct) <= 1.5:
+                parts.append(f'The tape is still fairly balanced near {price:.2f}, so expectations do not look extremely one-sided yet.')
+            else:
+                parts.append(f'Shares are {("up" if change_pct >= 0 else "down")} {abs(change_pct):.2f}% at about {price:.2f}, which shows traders are already taking a directional view into the event.')
+        else:
+            if surprise_pct is not None and surprise_pct > 0 and change_pct < 0:
+                parts.append(f'Shares are down {abs(change_pct):.2f}% at about {price:.2f}, so the market is telling you the headline beat was not enough on its own.')
+            elif surprise_pct is not None and surprise_pct < 0 and change_pct > 0:
+                parts.append(f'Shares are still up {change_pct:.2f}% at about {price:.2f}, so the bad print may have already been discounted before the report landed.')
+            else:
+                parts.append(f'Shares are {("up" if change_pct >= 0 else "down")} {abs(change_pct):.2f}% at about {price:.2f}, which is the cleanest read on whether the market is rewarding or rejecting the print.')
 
-    parts.append(f'This name also matters for {theme_text}, so a clean reaction can spill over into related peers.')
-    parts.append(f'Date source: {source_label}.')
+    parts.append(f'This name also matters for {theme_text}, so a clean earnings reaction can spill over into related peers and theme baskets.')
+    parts.append(f'Calendar source: {source_label}.')
     return ' '.join(parts)
 
 
@@ -1726,7 +1761,7 @@ def get_earnings_tracker(days_ahead: int = 21, limit: int = 120, lookback_days: 
     tracked_universe = list(dict.fromkeys(STOCK_UNIVERSE + [ticker for tickers in THEMES.values() for ticker in tickers]))
     events_by_ticker = {item['ticker']: item for item in _extract_nasdaq_earnings_candidates(tracked_universe, start_dt, end_dt)}
 
-    fallback_symbols = [ticker for ticker in tracked_universe if ticker not in events_by_ticker]
+    fallback_symbols = [ticker for ticker in tracked_universe if ticker not in events_by_ticker][:40]
     with ThreadPoolExecutor(max_workers=min(len(fallback_symbols), 10) if fallback_symbols else 1) as executor:
         futures = {
             executor.submit(_fetch_single_earnings_event, ticker, start_dt, end_dt, now_utc): ticker
@@ -1765,6 +1800,7 @@ def get_earnings_tracker(days_ahead: int = 21, limit: int = 120, lookback_days: 
             'company_name': quote_data.get('long_name') or ticker,
             'earnings_date': earnings_dt.isoformat(),
             'earnings_date_display': display,
+            'report_time': event.get('report_time'),
             'days_until': days_until,
             'status': status,
             'eps_estimate': event.get('eps_estimate'),
@@ -1980,9 +2016,12 @@ def _session_grade(item: dict, detail: dict) -> str:
     short_interest = detail.get('short_interest') or 0
     float_shares = detail.get('float_shares')
     session_rvol = item.get('session_rvol')
+    news_quality = str(item.get('news_quality') or '').lower()
 
     if item.get('has_verified_headline'):
         score += 2
+    elif news_quality == 'high':
+        score += 1
     if session_pct >= 10:
         score += 2
     elif session_pct >= 6:
@@ -1998,6 +2037,10 @@ def _session_grade(item: dict, detail: dict) -> str:
         score += 2
     elif session_rvol is not None and session_rvol >= 0.04:
         score += 1
+    if news_quality == 'high':
+        score += 1
+    if item.get('session_source') == 'daily_proxy':
+        score = max(score - 1, 0)
 
     if score >= 6:
         return 'A'
@@ -2241,10 +2284,12 @@ def _build_session_analysis_blocks(item: dict, detail: dict, headline: Optional[
     volume_text = f'{session_rvol:.2f}x extended relative volume' if session_rvol is not None else 'unclear extended-volume confirmation'
     short_interest_text = f'{short_interest:.2f}% short interest' if short_interest is not None else 'limited short-interest visibility'
     float_text = _format_share_count(float_shares) if float_shares is not None else 'an unavailable float reading'
+    headline_summary = (headline.get('summary') or '').strip() if headline else ''
     blocks = [{
         'title': 'The Catalyst',
         'body': (
             f'{headline.get("title")} is the verified lead headline. Source: {headline.get("source")}. '
+            f'{headline_summary} '
             f'Published {_format_headline_stamp(headline.get("published_at"))}.'
             if headline else
             'No verified headline was found, so this row should be treated as watchlist-only rather than a confirmed catalyst setup.'
@@ -2367,28 +2412,57 @@ def _analyst_expectation(detail: dict) -> str:
     return ' '.join(part for part in (rec_text, target_text, quality_text, coverage_text) if part)
 
 
+def _headline_quality_label(headline: Optional[dict]) -> Optional[str]:
+    if not headline:
+        return None
+    score = headline.get('match_score') or 0
+    if score >= 20:
+        return 'High'
+    if score >= 12:
+        return 'Medium'
+    return 'Low'
+
+
 def _build_session_reasoning(item: dict, detail: dict, headlines: List[dict]) -> dict:
     session_pct = item.get('session_pct') or 0
     session_rvol = item.get('session_rvol')
     headline = headlines[0] if headlines else None
+    headline_summary = (headline.get('summary') or '').strip() if headline else ''
+    news_quality = _headline_quality_label(headline)
     perception_before = _perception_before(detail)
     analyst_view = _analyst_expectation(detail)
     no_headline_path = _potential_catalyst_path(detail, 'No verified catalyst')
+    session_source = item.get('session_source') or 'quote'
+    label = item.get('session_label') or _session_label(item.get('session') or 'pre')
+    source_read = (
+        f'This read is coming from the actual {label.lower()} tape.'
+        if session_source == 'extended' else
+        'The move is being confirmed by the live quote feed.'
+        if session_source == 'quote' else
+        f'This row is still leaning on a daily proxy, so confidence stays lower until the live {label.lower()} tape confirms it.'
+    )
 
     if not headline:
+        reasoning_parts = [
+            'No verified catalyst was found in the live headline feed, so this move should be treated as tape-driven until a real source appears.',
+            source_read,
+            no_headline_path,
+        ]
         return {
             'has_verified_headline': False,
             'headline_title': None,
             'headline_source': None,
             'headline_url': None,
             'headline_published_at': None,
+            'headline_summary': '',
             'headline_label': 'No verified catalyst',
+            'news_quality': None,
             'event_label': 'No verified catalyst',
             'perception_before': f'Before the move, the setup looked like {perception_before}.',
             'what_changed': 'Treat the tape as watchlist-only until a clean company-specific headline appears.',
             'market_view': 'The move may still matter, but it is not being explained by a verified catalyst feed right now. Without a clean headline, investors will assume this is positioning until proven otherwise.',
             'analyst_view': analyst_view,
-            'reasoning': f'No verified catalyst was found in the live headline feed, so this move should be treated as tape-driven until a real source appears. {no_headline_path}',
+            'reasoning': ' '.join(part for part in reasoning_parts if part),
             'analysis_blocks': _build_session_analysis_blocks(item, detail, None, 'No verified catalyst'),
         }
 
@@ -2398,26 +2472,51 @@ def _build_session_reasoning(item: dict, detail: dict, headlines: List[dict]) ->
     direction = 'higher' if session_pct >= 0 else 'lower'
     reset_read = _catalyst_reset_read(category, detail)
     catalyst_path = _potential_catalyst_path(detail, category)
-    volume_line = ''
-    if session_rvol is not None:
-        volume_line = f' Extended volume is running at {session_rvol:.2f}x of the 20-day average, which helps separate a catalyst-driven move from a weak headline drift.'
-    reasoning = (
-        f'{item.get("ticker")} is trading {direction} after "{headline.get("title")}" ({source}). '
-        f'This reads as a {category.lower()} catalyst because {reset_read}. '
-        f'{catalyst_path}{volume_line}'
-    )
-    market_view = (
-        f'If the open holds, the tape is treating this as a real repricing rather than a sympathy move. {catalyst_path}'
-        if session_pct >= 0 else
-        f'If the weakness holds into the open, the market is treating the headline as a genuine de-risking event. {catalyst_path}'
-    )
+    if session_pct >= 8:
+        reaction = f'The {label.lower()} move is large enough to look like a genuine rerating attempt rather than a routine gap.'
+    elif session_pct > 0:
+        reaction = f'The {label.lower()} move is constructive, but it still needs the cash open to hold before traders will fully trust it.'
+    elif session_pct <= -8:
+        reaction = f'The {label.lower()} move is a hard de-risking move, so weak bounces are vulnerable unless price quickly repairs the damage.'
+    else:
+        reaction = f'The {label.lower()} move is negative, but it still needs follow-through after the open before it turns into a more durable breakdown read.'
+
+    participation_parts = [source_read]
+    if session_rvol is not None and session_rvol >= 0.1:
+        participation_parts.append(f'Extended volume is already around {session_rvol:.2f}x a normal full-day baseline')
+    elif session_rvol is not None and session_rvol >= 0.04:
+        participation_parts.append(f'Extended volume has started to show up at about {session_rvol:.2f}x of a normal baseline')
+    if item.get('float_shares') is not None and item.get('float_shares') <= 250_000_000:
+        participation_parts.append(f'the float is only about {_format_share_count(item.get("float_shares"))}')
+    if (item.get('short_interest') or 0) >= 12:
+        participation_parts.append(f'short interest near {item.get("short_interest"):.1f}% adds squeeze sensitivity')
+    participation = '. '.join(part.rstrip('.') for part in participation_parts if part)
+    if participation:
+        participation += '.'
+
+    if session_source == 'daily_proxy':
+        market_view = f'This still needs live {label.lower()} confirmation, so it is better treated as a watchlist candidate than a fully confirmed catalyst board name.'
+    elif session_pct >= 0:
+        market_view = f'If the open holds, the tape is treating this as a real repricing rather than a sympathy move. {catalyst_path}'
+    else:
+        market_view = f'If the weakness holds into the open, the market is treating the headline as a genuine de-risking event. {catalyst_path}'
+
+    reasoning = ' '.join(part for part in (
+        f'{item.get("ticker")} is trading {direction} after "{headline.get("title")}" ({source}).',
+        f'This reads as a {category.lower()} catalyst because {reset_read}.',
+        reaction,
+        participation,
+        catalyst_path,
+    ) if part)
     return {
         'has_verified_headline': True,
         'headline_title': headline.get('title'),
         'headline_source': source,
         'headline_url': headline.get('url'),
         'headline_published_at': published_at,
+        'headline_summary': headline_summary,
         'headline_label': f'{source} | {_format_headline_stamp(published_at)}',
+        'news_quality': news_quality,
         'event_label': category,
         'perception_before': f'Before the move, the setup looked like {perception_before}.',
         'what_changed': f'Verified lead headline: "{headline.get("title")}". The new information matters because {reset_read}.',
@@ -2446,7 +2545,7 @@ def _session_seed_symbols(tracked_universe: List[str], quotes: dict, session: st
         ),
     )
 
-    desired = max(limit * 4, 36)
+    desired = max(limit * 6, 80)
     seeds: List[str] = []
     for pool in (direct, liquid):
         for symbol in pool:
@@ -2457,7 +2556,7 @@ def _session_seed_symbols(tracked_universe: List[str], quotes: dict, session: st
             market_cap = _safe_float(quote_data.get('market_cap')) or 0
             if direct_move is None and average_volume < 250000 and market_cap < 250_000_000:
                 continue
-            if direct_move is None and abs(daily_move or 0) < max(min_move, 1.5):
+            if direct_move is None and abs(daily_move or 0) < max(min_move, 1.5) and average_volume < 2_000_000 and market_cap < 5_000_000_000:
                 continue
             if symbol not in seeds:
                 seeds.append(symbol)
@@ -2576,6 +2675,8 @@ def get_session_movers(session: str = 'pre', min_move: float = 0.5, limit: int =
             'headline_url': session_context.get('headline_url'),
             'headline_published_at': session_context.get('headline_published_at'),
             'headline_label': session_context.get('headline_label'),
+            'headline_summary': session_context.get('headline_summary') or (headlines[0].get('summary') if headlines else ''),
+            'news_quality': session_context.get('news_quality'),
             'event_label': session_context.get('event_label'),
             'perception_before': session_context.get('perception_before'),
             'what_changed': session_context.get('what_changed'),
@@ -2583,7 +2684,7 @@ def get_session_movers(session: str = 'pre', min_move: float = 0.5, limit: int =
             'analyst_view': session_context.get('analyst_view'),
             'reasoning': session_context.get('reasoning'),
             'analysis_blocks': session_context.get('analysis_blocks') or [],
-            'headline_summary': headlines[0].get('summary') if headlines else '',
+            'news_items': news_items[:3],
             'verified_headline_count': len(headlines),
             'category': 'Proxy / Daily Momentum' if item.get('session_source') == 'daily_proxy' else session_context.get('event_label'),
         })
@@ -2593,7 +2694,13 @@ def get_session_movers(session: str = 'pre', min_move: float = 0.5, limit: int =
     display_rows = verified_rows if verified_rows else list(ticker_map.values())
     leader_rows = sorted(display_rows, key=lambda row: row.get('session_pct') or 0, reverse=True)[:limit]
     laggard_rows = sorted(display_rows, key=lambda row: row.get('session_pct') or 0)[:limit]
-    all_rows = sorted(display_rows, key=lambda row: abs(row.get('session_pct') or 0), reverse=True)
+    all_rows = sorted(
+        display_rows,
+        key=lambda row: (
+            row.get('session_source') == 'daily_proxy',
+            -abs(row.get('session_pct') or 0),
+        ),
+    )
 
     return {
         'updated_at': datetime.now(timezone.utc).isoformat(),

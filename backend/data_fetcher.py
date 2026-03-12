@@ -1504,29 +1504,39 @@ def _extract_nasdaq_earnings_candidates(tracked_universe: List[str], start_dt: d
     tracked = {ticker.upper() for ticker in tracked_universe}
     candidate_map = {}
     current_date = start_dt.astimezone(EASTERN_TZ).date()
-    end_date = end_dt.astimezone(EASTERN_TZ).date()
-
-    while current_date <= end_date:
-        for row in _fetch_nasdaq_earnings_rows(current_date):
-            ticker = str(row.get('symbol') or row.get('ticker') or '').upper().strip()
-            if not ticker or ticker not in tracked:
-                continue
-            earnings_dt = _nasdaq_event_datetime(current_date, row)
-            if earnings_dt < start_dt or earnings_dt > end_dt:
-                continue
-            candidate = _make_earnings_candidate(
-                ticker,
-                earnings_dt,
-                'nasdaq_calendar',
-                eps_estimate=_clean_numeric_text(row.get('epsForecast') or row.get('estimate') or row.get('epsEstimate')),
-                reported_eps=_clean_numeric_text(row.get('eps') or row.get('epsActual') or row.get('reportedEPS')),
-                surprise_pct=_clean_numeric_text(row.get('surprise') or row.get('surprisePercentage') or row.get('surprisePercent')),
-            )
-            candidate['report_time'] = _nasdaq_row_time_label(row)
-            existing = candidate_map.get(ticker)
-            if not existing or abs((candidate['earnings_date'] - start_dt).total_seconds()) < abs((existing['earnings_date'] - start_dt).total_seconds()):
-                candidate_map[ticker] = candidate
+    last_date = end_dt.astimezone(EASTERN_TZ).date()
+    target_dates = []
+    while current_date <= last_date:
+        target_dates.append(current_date)
         current_date += timedelta(days=1)
+
+    with ThreadPoolExecutor(max_workers=min(len(target_dates), 6) if target_dates else 1) as executor:
+        futures = {executor.submit(_fetch_nasdaq_earnings_rows, target_date): target_date for target_date in target_dates}
+        for future in as_completed(futures):
+            target_date = futures[future]
+            try:
+                rows = future.result()
+            except Exception:
+                rows = []
+            for row in rows:
+                ticker = str(row.get('symbol') or row.get('ticker') or '').upper().strip()
+                if not ticker or ticker not in tracked:
+                    continue
+                earnings_dt = _nasdaq_event_datetime(target_date, row)
+                if earnings_dt < start_dt or earnings_dt > end_dt:
+                    continue
+                candidate = _make_earnings_candidate(
+                    ticker,
+                    earnings_dt,
+                    'nasdaq_calendar',
+                    eps_estimate=_clean_numeric_text(row.get('epsForecast') or row.get('estimate') or row.get('epsEstimate')),
+                    reported_eps=_clean_numeric_text(row.get('eps') or row.get('epsActual') or row.get('reportedEPS')),
+                    surprise_pct=_clean_numeric_text(row.get('surprise') or row.get('surprisePercentage') or row.get('surprisePercent')),
+                )
+                candidate['report_time'] = _nasdaq_row_time_label(row)
+                existing = candidate_map.get(ticker)
+                if not existing or abs((candidate['earnings_date'] - start_dt).total_seconds()) < abs((existing['earnings_date'] - start_dt).total_seconds()):
+                    candidate_map[ticker] = candidate
 
     return list(candidate_map.values())
 
@@ -1761,7 +1771,7 @@ def get_earnings_tracker(days_ahead: int = 21, limit: int = 120, lookback_days: 
     tracked_universe = list(dict.fromkeys(STOCK_UNIVERSE + [ticker for tickers in THEMES.values() for ticker in tickers]))
     events_by_ticker = {item['ticker']: item for item in _extract_nasdaq_earnings_candidates(tracked_universe, start_dt, end_dt)}
 
-    fallback_symbols = [ticker for ticker in tracked_universe if ticker not in events_by_ticker][:40]
+    fallback_symbols = [] if events_by_ticker else tracked_universe[:40]
     with ThreadPoolExecutor(max_workers=min(len(fallback_symbols), 10) if fallback_symbols else 1) as executor:
         futures = {
             executor.submit(_fetch_single_earnings_event, ticker, start_dt, end_dt, now_utc): ticker
@@ -1782,7 +1792,7 @@ def get_earnings_tracker(days_ahead: int = 21, limit: int = 120, lookback_days: 
         item['ticker'],
     ))
     visible_events = all_events[:limit]
-    quotes = _batch_fetch_quotes([item['ticker'] for item in visible_events])
+    quotes = _batch_fetch_chart_quotes([item['ticker'] for item in visible_events])
 
     items = []
     for event in visible_events:

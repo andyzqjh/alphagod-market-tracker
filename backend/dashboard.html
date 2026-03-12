@@ -4,15 +4,18 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Market Dashboard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
   <script>
     (function () {
       var base = window.location.protocol === 'file:' ? './backend/static' : '/static';
       var link = document.createElement('link');
       link.rel = 'stylesheet';
-      link.href = base + '/dashboard.css?v=20260311-8';
+      link.href = base + '/dashboard.css?v=20260312-9';
       document.head.appendChild(link);
       var script = document.createElement('script');
-      script.src = base + '/dashboard.js?v=20260312-19';
+      script.src = base + '/dashboard.js?v=20260312-20';
       script.defer = true;
       document.head.appendChild(script);
     })();

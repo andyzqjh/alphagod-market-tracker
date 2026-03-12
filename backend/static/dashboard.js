@@ -509,11 +509,11 @@
 
     return `
       <header class="panel hero">
-        <div class="hero-top">
-          <div>
-            <div class="kicker">HTML Market Dashboard</div>
-            <h1>Live market dashboard with S&amp;P heatmap, verified news, ETF rotation, and AI chart context.</h1>
-            <p>Track the tape, scan every S&amp;P 500 sector tile, toggle into the latest verified headlines, inspect theme constituents, and open a chart desk with AI commentary beside the TradingView chart.</p>
+          <div class="hero-top">
+            <div>
+            <div class="kicker">AlphaGod Market Command Centre</div>
+            <h1>One trading desk for tape, heatmap, verified headlines, rotation, and chart context.</h1>
+            <p>Track the tape, scan the S&amp;P heatmap, step through verified news, inspect theme leadership, and open a chart desk with AI commentary beside the TradingView chart without leaving the dashboard.</p>
           </div>
           <div class="clock-card">
             <div class="label">Current time</div>

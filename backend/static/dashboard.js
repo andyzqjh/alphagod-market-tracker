@@ -2228,6 +2228,9 @@
       if (state.activeTab === 'watchlist' && !state.watchlist && state.watchlistTickers.length) loadWatchlist();
       if (state.activeTab === 'premarket' && !state.premarket) loadPremarket();
       if (state.activeTab === 'postmarket' && !state.postmarket) loadPostmarket();
+      if (state.activeTab === 'themes' && !state.themes) loadThemes();
+      if (state.activeTab === 'flows' && !state.etfs) loadEtfs();
+      if (state.activeTab === 'rrg' && !state.rrg) loadRrg();
       if (state.activeTab === 'monitor' && !state.monitor) loadMonitor();
       if (state.activeTab === 'chart' && !state.chartWorkspace) loadChartWorkspace(state.chartSymbol);
       if (state.activeTab === 'earnings' && !state.earnings) loadEarnings();
@@ -2349,8 +2352,6 @@
     loadBrief();
     loadThemes();
     loadEtfs();
-    loadRrg();
-    loadChartWorkspace(state.chartSymbol);
     document.addEventListener('click', handleClick);
     document.addEventListener('input', handleInput);
     document.addEventListener('keydown', handleKeydown);
@@ -2358,31 +2359,15 @@
     window.setInterval(() => loadOverviewBundle(true), AUTO_REFRESH_MS);
     window.setInterval(() => { if (state.premarket) loadPremarket(true); }, AUTO_REFRESH_MS);
     window.setInterval(() => { if (state.postmarket) loadPostmarket(true); }, AUTO_REFRESH_MS);
-    window.setInterval(() => loadThemes(true), AUTO_REFRESH_MS);
-    window.setInterval(() => loadEtfs(true), AUTO_REFRESH_MS);
-    window.setInterval(() => loadRrg(true), RRG_REFRESH_MS);
+    window.setInterval(() => { if (state.themes) loadThemes(true); }, AUTO_REFRESH_MS);
+    window.setInterval(() => { if (state.etfs) loadEtfs(true); }, AUTO_REFRESH_MS);
+    window.setInterval(() => { if (state.rrg) loadRrg(true); }, RRG_REFRESH_MS);
     window.setInterval(() => { if (state.earnings) loadEarnings(true); }, AUTO_REFRESH_MS);
     window.setInterval(() => { if (state.monitor) loadMonitor(true); }, AUTO_REFRESH_MS);
     window.setInterval(() => { if (state.heatmap) loadHeatmap(true); }, AUTO_REFRESH_MS);
     window.setInterval(() => { if (state.news) loadNews(true); }, AUTO_REFRESH_MS);
     window.setInterval(() => { if (state.watchlistTickers.length) loadWatchlist(true); }, AUTO_REFRESH_MS);
     window.setInterval(() => loadBrief(true), AUTO_REFRESH_MS);
-    window.setTimeout(() => {
-      if (state.heatmap || state.loading.heatmap) return;
-      loadHeatmap().then(() => {
-        if (!state.news && !state.loading.news) {
-          loadNews();
-        }
-      });
-    }, 1500);
-    window.setTimeout(() => {
-      if (!state.watchlistTickers.length || state.watchlist || state.loading.watchlist) return;
-      loadWatchlist();
-    }, 2800);
-    window.setTimeout(() => {
-      if (state.earnings || state.loading.earnings) return;
-      loadEarnings();
-    }, 2200);
   }
 
   boot();

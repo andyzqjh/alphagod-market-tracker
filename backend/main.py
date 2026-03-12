@@ -1,5 +1,6 @@
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from typing import List, Optional
 
@@ -34,7 +35,14 @@ app.add_middleware(CORSMiddleware, allow_origins=['*'], allow_methods=['*'], all
 _cache: dict = {}
 _cache_time: dict = {}
 CACHE_TTL = 300
-MARKET_BRIEF_TICKERS = ['SPY', 'QQQ', 'IWM', 'TLT', 'GLD', 'BTC-USD']
+MARKET_BRIEF_HEADLINE_TARGETS = [
+    {'ticker': 'SPY', 'company_name': 'SPDR S&P 500 ETF Trust'},
+    {'ticker': 'QQQ', 'company_name': 'Invesco QQQ Trust'},
+    {'ticker': 'IWM', 'company_name': 'iShares Russell 2000 ETF'},
+    {'ticker': 'TLT', 'company_name': 'iShares 20+ Year Treasury Bond ETF'},
+    {'ticker': 'GLD', 'company_name': 'SPDR Gold Shares'},
+    {'ticker': 'BTC-USD', 'company_name': 'Bitcoin'},
+]
 
 
 def get_cached(key: str, ttl: int = CACHE_TTL):
@@ -49,20 +57,55 @@ def set_cache(key: str, value):
 
 
 def _collect_market_headlines() -> List[dict]:
+    cached = get_cached('market_brief_headlines', ttl=180)
+    if cached:
+        return cached
+
     headlines = []
     seen = set()
-    for ticker in MARKET_BRIEF_TICKERS:
-        detail = get_stock_detail(ticker)
-        company_name = detail.get('company_name') or ticker
-        items = [item for item in get_stock_news(ticker, company_name=company_name) if item.get('verified')]
-        for item in items[:3]:
-            key = item.get('url') or f"{ticker}:{item.get('title')}"
-            if key in seen:
-                continue
-            seen.add(key)
-            headlines.append(item)
-    headlines.sort(key=lambda item: item.get('time', 0), reverse=True)
-    return headlines[:12]
+
+    def fetch_target(target: dict) -> List[dict]:
+        ticker = target.get('ticker') or ''
+        company_name = target.get('company_name') or ticker
+        items = get_stock_news(ticker, company_name=company_name, limit=6)
+        filtered = [item for item in items if item.get('verified')] or items
+        selected = []
+        for item in filtered:
+            payload = dict(item)
+            payload.setdefault('ticker', ticker)
+            selected.append(payload)
+            if len(selected) >= 2:
+                break
+        return selected
+
+    with ThreadPoolExecutor(max_workers=min(4, len(MARKET_BRIEF_HEADLINE_TARGETS))) as executor:
+        futures = {
+            executor.submit(fetch_target, target): target['ticker']
+            for target in MARKET_BRIEF_HEADLINE_TARGETS
+        }
+        for future in as_completed(futures):
+            ticker = futures[future]
+            try:
+                items = future.result() or []
+            except Exception:
+                items = []
+            for item in items:
+                key = item.get('url') or f"{ticker}:{item.get('title')}"
+                if key in seen:
+                    continue
+                seen.add(key)
+                headlines.append(item)
+
+    headlines.sort(
+        key=lambda item: (
+            0 if item.get('verified') else 1,
+            -(item.get('match_score') or 0),
+            -(item.get('time') or 0),
+        )
+    )
+    payload = headlines[:12]
+    set_cache('market_brief_headlines', payload)
+    return payload
 
 
 @app.get('/')

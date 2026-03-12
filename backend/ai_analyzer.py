@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 load_dotenv()
 API_KEY = os.environ.get('ANTHROPIC_API_KEY')
 client = Anthropic(api_key=API_KEY) if API_KEY else None
+AI_TIMEOUT_SECONDS = float(os.environ.get('ANTHROPIC_TIMEOUT_SECONDS', '18'))
 
 
 def _safe_json_load(text: str, fallback: dict) -> dict:
@@ -31,6 +32,7 @@ def _call_json(prompt: str, fallback: dict, max_tokens: int = 900) -> dict:
             model='claude-sonnet-4-6',
             max_tokens=max_tokens,
             messages=[{'role': 'user', 'content': prompt}],
+            timeout=AI_TIMEOUT_SECONDS,
         )
         text = message.content[0].text if message.content else ''
         return _safe_json_load(text, fallback)

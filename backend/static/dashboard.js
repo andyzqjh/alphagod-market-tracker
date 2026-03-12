@@ -1331,15 +1331,63 @@
   function renderPostmarketTab() {
     return renderSessionMoversTab('postmarket');
   }
+
+  function reportTimeRank(value) {
+    if (value === 'BMO') return 0;
+    if (value === 'TNS') return 1;
+    if (value === 'AMC') return 2;
+    return 3;
+  }
+
+  function renderEarningsStoryCards(items, mode, emptyMessage) {
+    if (!items.length) return emptyState(emptyMessage);
+    return `
+      <div class="detail-grid">
+        ${items.map((item) => `
+          <div class="brief-card">
+            <div class="desk-head">
+              <div>
+                <div class="section-kicker">${mode === 'review' ? 'Yesterday Review' : 'Today Focus'}</div>
+                <h2 style="font-size:1.2rem;">${esc(item.company_name || item.ticker)}</h2>
+                <p>${esc(item.earnings_date_display || 'n/a')}</p>
+              </div>
+              <button class="chip-btn clicker mono" data-open-desk="${esc(item.ticker)}">${esc(item.ticker)}</button>
+            </div>
+            <div class="pills" style="margin-top:14px;">
+              <span class="soft-pill ${mode === 'review' ? deltaClass(item.change_pct) : item.status === 'Today' ? 'warn' : 'pos'}">${esc(mode === 'review' ? 'Yesterday' : (item.report_time || item.status || 'Today'))}</span>
+              <span class="soft-pill">EPS Est ${item.eps_estimate != null ? item.eps_estimate.toFixed(2) : 'n/a'}</span>
+              <span class="soft-pill">Reported ${item.reported_eps != null ? item.reported_eps.toFixed(2) : 'n/a'}</span>
+              <span class="soft-pill ${deltaClass(item.surprise_pct)}">Surprise ${fmtPercent(item.surprise_pct)}</span>
+              <span class="soft-pill ${deltaClass(item.change_pct)}">1D ${fmtPercent(item.change_pct)}</span>
+            </div>
+            <div class="paragraphs" style="margin-top:16px;">
+              <div class="paragraph">${esc(mode === 'review' ? `What they said / what the tape heard: ${item.reasoning || 'n/a'}` : `What matters into the print: ${item.reasoning || 'n/a'}`)}</div>
+              ${(item.themes || []).length ? `<div class="paragraph">${esc(`Theme spillover: ${(item.themes || []).join(', ')}.`)}</div>` : ''}
+            </div>
+          </div>
+        `).join('')}
+      </div>
+    `;
+  }
+
   function renderEarningsTab() {
     const earnings = state.earnings;
     const items = earnings?.items || [];
     const brief = earnings?.brief || {};
     const coverage = earnings?.summary?.coverage_universe ?? '--';
+    const yesterdayItems = items
+      .filter((item) => Number(item.days_until) === -1)
+      .sort((a, b) => Math.abs(Number(b.change_pct || 0)) - Math.abs(Number(a.change_pct || 0)))
+      .slice(0, 6);
+    const todayItems = items
+      .filter((item) => Number(item.days_until) === 0)
+      .sort((a, b) => (reportTimeRank(a.report_time) - reportTimeRank(b.report_time))
+        || (Math.abs(Number(b.change_pct || 0)) - Math.abs(Number(a.change_pct || 0))))
+      .slice(0, 8);
 
     const summaryHtml = state.loading.earnings && !earnings
       ? emptyState('Loading earnings tracker...')
-      : state.errors.earnings
+      : (!earnings && state.errors.earnings)
         ? errorState(state.errors.earnings)
         : `
           <div class="metrics-5">
@@ -1353,7 +1401,7 @@
 
     const briefHtml = state.loading.earnings && !earnings
       ? emptyState('Building the earnings brief...')
-      : state.errors.earnings
+      : (!earnings && state.errors.earnings)
         ? errorState(state.errors.earnings)
         : `
           <div class="brief-card">
@@ -1366,10 +1414,30 @@
               <span class="soft-pill warn">Updated ${fmtTime(earnings?.updated_at)}</span>
             </div>
             <div class="paragraphs">
-              ${[brief.summary, brief.focus, brief.themes, brief.risk].filter(Boolean).map((text) => `<div class="paragraph">${esc(text)}</div>`).join('') || emptyState('The earnings brief is not available yet.')}
+              ${[brief.summary, brief.yesterday_review, brief.today_setup, brief.today_commentary, brief.focus, brief.themes, brief.risk].filter(Boolean).map((text) => `<div class="paragraph">${esc(text)}</div>`).join('') || emptyState('The earnings brief is not available yet.')}
             </div>
           </div>
         `;
+
+    const yesterdayHtml = state.loading.earnings && !earnings
+      ? emptyState("Loading yesterday's earnings reviews...")
+      : (!earnings && state.errors.earnings)
+        ? errorState(state.errors.earnings)
+        : renderEarningsStoryCards(
+          yesterdayItems,
+          'review',
+          "No tracked names reported yesterday in the current earnings window.",
+        );
+
+    const todayHtml = state.loading.earnings && !earnings
+      ? emptyState("Loading today's earnings setups...")
+      : (!earnings && state.errors.earnings)
+        ? errorState(state.errors.earnings)
+        : renderEarningsStoryCards(
+          todayItems,
+          'today',
+          "No tracked names are scheduled for today in the current earnings window.",
+        );
 
     const tableHtml = items.length
       ? `
@@ -1421,14 +1489,34 @@
           <div class="section-head">
             <div>
               <div class="section-kicker">Earnings Tracker</div>
-              <h2>Recent and upcoming U.S. earnings</h2>
-              <p>Watch the tracked liquid-stock universe for fresh prints and near-term report dates, then open any name in the chart desk to pair price action with news and AI context.</p>
+              <h2>Yesterday's reviews and today's earnings setup</h2>
+              <p>Split the board into what just happened, what is due today, and the reasons the market appears to care so the tab reads more like a trader's review sheet than a calendar dump.</p>
             </div>
             <button class="action-btn" data-refresh="earnings">Refresh Earnings</button>
           </div>
           ${summaryHtml}
         </section>
         <section class="panel section">${briefHtml}</section>
+        <section class="panel section">
+          <div class="section-head">
+            <div>
+              <div class="section-kicker">Yesterday</div>
+              <h2>Yesterday's earnings review</h2>
+              <p>Use this block to review what companies just reported, how the market reacted, and what that reaction is saying about expectations.</p>
+            </div>
+          </div>
+          ${yesterdayHtml}
+        </section>
+        <section class="panel section">
+          <div class="section-head">
+            <div>
+              <div class="section-kicker">Today</div>
+              <h2>Today's earnings focus</h2>
+              <p>Watch today's reporters in report-time order so the board shows the setup, what the market is waiting to hear, and the reason each name matters.</p>
+            </div>
+          </div>
+          ${todayHtml}
+        </section>
         <section class="panel section">
           <div class="section-head">
             <div>
@@ -2023,7 +2111,7 @@
     state.errors.earnings = '';
     render();
     try {
-      state.earnings = await api('/api/earnings-tracker', 12000);
+      state.earnings = await api('/api/earnings-tracker', 150000);
     } catch (error) {
       console.error(error);
       state.errors.earnings = 'Unable to load the earnings tracker right now.';
@@ -2291,6 +2379,10 @@
       if (!state.watchlistTickers.length || state.watchlist || state.loading.watchlist) return;
       loadWatchlist();
     }, 2800);
+    window.setTimeout(() => {
+      if (state.earnings || state.loading.earnings) return;
+      loadEarnings();
+    }, 2200);
   }
 
   boot();

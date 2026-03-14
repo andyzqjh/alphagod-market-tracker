@@ -13,6 +13,15 @@ client = Anthropic(api_key=API_KEY) if API_KEY else None
 
 def _json_text(value) -> str:
     return json.dumps(value, ensure_ascii=False, default=str)
+
+
+def _safe_float(value):
+    try:
+        if value in (None, ''):
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 AI_TIMEOUT_SECONDS = float(os.environ.get('ANTHROPIC_TIMEOUT_SECONDS', '18'))
 
 
@@ -150,11 +159,70 @@ def _build_headline_impacts(headlines: List[dict], trend_state: str) -> List[dic
     return impacts
 
 
+def _target_spread(detail: dict) -> Optional[float]:
+    price = _safe_float(detail.get('price'))
+    target = _safe_float(detail.get('target_mean_price'))
+    if price in (None, 0) or target is None:
+        return None
+    try:
+        return ((target - price) / price) * 100
+    except Exception:
+        return None
+
+
+def _fundamental_snapshot(detail: dict) -> str:
+    revenue_growth = _safe_float(detail.get('revenue_growth'))
+    earnings_growth = _safe_float(detail.get('earnings_growth'))
+    gross_margin = _safe_float(detail.get('gross_margin'))
+    operating_margin = _safe_float(detail.get('operating_margin'))
+    profit_margin = _safe_float(detail.get('profit_margin'))
+    forward_pe = _safe_float(detail.get('forward_pe'))
+    price_to_sales = _safe_float(detail.get('price_to_sales'))
+
+    pieces = []
+    if revenue_growth is not None:
+        pieces.append(f'revenue growth near {revenue_growth:.1f}%')
+    if earnings_growth is not None:
+        pieces.append(f'earnings growth near {earnings_growth:.1f}%')
+    if gross_margin is not None:
+        pieces.append(f'gross margin around {gross_margin:.1f}%')
+    if operating_margin is not None:
+        pieces.append(f'operating margin near {operating_margin:.1f}%')
+    if profit_margin is not None:
+        pieces.append(f'net margin around {profit_margin:.1f}%')
+    if forward_pe is not None:
+        pieces.append(f'forward P/E near {forward_pe:.1f}x')
+    elif price_to_sales is not None:
+        pieces.append(f'price-to-sales near {price_to_sales:.1f}x')
+
+    if not pieces:
+        return 'Published fundamental detail is thin, so the read has to lean more on headline quality, estimate changes, and live tape confirmation.'
+    return f'The current profile still shows {", ".join(pieces[:5])}. That matters because the market is deciding whether the next catalyst can change this profile or only create a short-lived reaction.'
+
+
+def _valuation_context(detail: dict) -> str:
+    spread = _target_spread(detail)
+    forward_pe = _safe_float(detail.get('forward_pe'))
+    price_to_sales = _safe_float(detail.get('price_to_sales'))
+
+    if spread is not None and spread >= 12:
+        return f'Consensus target still sits about {spread:.1f}% above spot, so valuation still leaves room if the better story starts feeding into estimates.'
+    if spread is not None and spread <= -8:
+        return f'The stock is already trading roughly {abs(spread):.1f}% above consensus target, so upside probably needs stronger proof than the Street is currently publishing.'
+    if forward_pe is not None and forward_pe >= 30:
+        return f'At roughly {forward_pe:.1f}x forward earnings, the multiple already assumes a fair amount of quality, so the next leg needs more than a one-day headline.'
+    if forward_pe is not None and forward_pe <= 12:
+        return f'At only about {forward_pe:.1f}x forward earnings, the valuation can still rerate if execution and estimates inflect.'
+    if price_to_sales is not None and price_to_sales >= 8:
+        return f'At about {price_to_sales:.1f}x sales, investors will want cleaner proof that growth and margins can keep compounding.'
+    return 'Valuation is not extreme either way, so follow-through will depend more on estimate revisions and whether institutions keep paying for the new narrative.'
+
+
 def _perception_before(detail: dict) -> str:
-    operating_margin = detail.get('operating_margin')
-    gross_margin = detail.get('gross_margin')
-    forward_pe = detail.get('forward_pe')
-    revenue_growth = detail.get('revenue_growth')
+    operating_margin = _safe_float(detail.get('operating_margin'))
+    gross_margin = _safe_float(detail.get('gross_margin'))
+    forward_pe = _safe_float(detail.get('forward_pe'))
+    revenue_growth = _safe_float(detail.get('revenue_growth'))
 
     if operating_margin is not None and operating_margin <= 10:
         return 'The market has mostly treated this as a lower-margin execution story, so any proof of margin improvement can change the multiple fast.'
@@ -171,11 +239,7 @@ def _perception_before(detail: dict) -> str:
 def _expectation_view(detail: dict) -> str:
     recommendation = (detail.get('recommendation') or '').lower()
     analyst_count = detail.get('analyst_count')
-    price = detail.get('price')
-    target = detail.get('target_mean_price')
-    spread = None
-    if price not in (None, 0) and target is not None:
-        spread = ((target - price) / price) * 100
+    spread = _target_spread(detail)
 
     pieces = []
     if recommendation in ('buy', 'strong_buy'):
@@ -193,10 +257,12 @@ def _expectation_view(detail: dict) -> str:
         else:
             pieces.append('The stock is trading near consensus target, so follow-through matters more than the headline itself.')
 
-    if detail.get('revenue_growth') is not None:
-        pieces.append(f'Revenue growth is running around {detail["revenue_growth"]:.1f}%.')
-    if detail.get('earnings_growth') is not None:
-        pieces.append(f'Earnings growth is running around {detail["earnings_growth"]:.1f}%.')
+    revenue_growth = _safe_float(detail.get('revenue_growth'))
+    earnings_growth = _safe_float(detail.get('earnings_growth'))
+    if revenue_growth is not None:
+        pieces.append(f'Revenue growth is running around {revenue_growth:.1f}%.')
+    if earnings_growth is not None:
+        pieces.append(f'Earnings growth is running around {earnings_growth:.1f}%.')
     if analyst_count:
         pieces.append(f'{analyst_count} analysts are in the published set.')
 

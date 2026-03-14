@@ -1,5 +1,6 @@
 import json
 import os
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from datetime import datetime, timezone
 from typing import List, Optional
 
@@ -22,7 +23,7 @@ def _safe_float(value):
         return float(value)
     except (TypeError, ValueError):
         return None
-AI_TIMEOUT_SECONDS = float(os.environ.get('ANTHROPIC_TIMEOUT_SECONDS', '18'))
+AI_TIMEOUT_SECONDS = float(os.environ.get('ANTHROPIC_TIMEOUT_SECONDS', '12'))
 
 
 def _safe_json_load(text: str, fallback: dict) -> dict:
@@ -41,19 +42,28 @@ def _call_json(prompt: str, fallback: dict, max_tokens: int = 900) -> dict:
     if not client:
         return fallback
 
+    executor = ThreadPoolExecutor(max_workers=1)
     try:
-        message = client.messages.create(
+        future = executor.submit(
+            client.messages.create,
             model='claude-sonnet-4-6',
             max_tokens=max_tokens,
             messages=[{'role': 'user', 'content': prompt}],
             timeout=AI_TIMEOUT_SECONDS,
         )
+        message = future.result(timeout=AI_TIMEOUT_SECONDS)
         text = message.content[0].text if message.content else ''
         return _safe_json_load(text, fallback)
+    except FutureTimeoutError:
+        fallback = dict(fallback)
+        fallback.setdefault('error', f'AI request timed out after {AI_TIMEOUT_SECONDS}s')
+        return fallback
     except Exception as exc:
         fallback = dict(fallback)
         fallback.setdefault('error', str(exc))
         return fallback
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
 
 
 def _merge_with_fallback(fallback: dict, candidate: dict) -> dict:

@@ -404,6 +404,21 @@ def get_earnings_call_transcript(symbol: str, earnings_date=None) -> dict:
             'catalysts': [],
         }
 
+    if not FMP_API_KEY and not ALPHA_VANTAGE_API_KEY:
+        return {
+            'status': 'unavailable',
+            'provider': None,
+            'source_label': 'Add FMP_API_KEY or ALPHA_VANTAGE_API_KEY to enable transcript ingestion',
+            'symbol': ticker,
+            'quarter': None,
+            'date': None,
+            'entry_count': 0,
+            'management_excerpt': '',
+            'qa_excerpt': '',
+            'digest': '',
+            'catalysts': [],
+        }
+
     transcript = _fetch_fmp_transcript(ticker, earnings_date=earnings_date)
     if transcript:
         return transcript
@@ -412,14 +427,10 @@ def get_earnings_call_transcript(symbol: str, earnings_date=None) -> dict:
     if transcript:
         return transcript
 
-    source_label = 'Transcript unavailable'
-    if not FMP_API_KEY and not ALPHA_VANTAGE_API_KEY:
-        source_label = 'Add FMP_API_KEY or ALPHA_VANTAGE_API_KEY to enable transcript ingestion'
-
     return {
         'status': 'unavailable',
         'provider': None,
-        'source_label': source_label,
+        'source_label': 'Transcript unavailable',
         'symbol': ticker,
         'quarter': None,
         'date': None,

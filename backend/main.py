@@ -122,12 +122,15 @@ def _collect_market_headlines() -> List[dict]:
 
 
 def _market_context_snapshot() -> dict:
+    cached = get_cached('market_context_snapshot', ttl=120)
+    if cached:
+        return cached
     overview = market_overview()
     themes = theme_dashboard()
     etfs = etf_dashboard()
     headlines = _collect_market_headlines()
     brief_payload = market_brief()
-    return {
+    payload = {
         'overview_summary': overview.get('summary', {}),
         'best_theme': themes.get('summary', {}).get('best_theme'),
         'worst_theme': themes.get('summary', {}).get('worst_theme'),
@@ -137,6 +140,8 @@ def _market_context_snapshot() -> dict:
         'market_headlines': headlines[:5],
         'brief': brief_payload.get('brief', {}),
     }
+    set_cache('market_context_snapshot', payload)
+    return payload
 
 
 def _earnings_tracker_for_deep_dive():

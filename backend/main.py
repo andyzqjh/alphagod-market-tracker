@@ -9,7 +9,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
-from ai_analyzer import analyze_chart_reasoning, analyze_stock, build_earnings_brief, build_market_brief
+from ai_analyzer import (
+    analyze_chart_reasoning,
+    analyze_stock,
+    build_earnings_brief,
+    build_earnings_deep_dive,
+    build_market_brief,
+    build_watchlist_thesis,
+)
 from data_fetcher import (
     get_chart_snapshot,
     get_etf_dashboard,
@@ -27,6 +34,7 @@ from data_fetcher import (
 )
 from news_fetcher import get_reddit_posts, get_stock_news
 from stockbee_fetcher import get_stockbee_monitor
+from transcript_fetcher import get_earnings_call_transcript
 
 app = FastAPI(title='Stock Dashboard')
 app.mount('/static', StaticFiles(directory=os.path.join(os.path.dirname(__file__), 'static')), name='static')
@@ -106,6 +114,34 @@ def _collect_market_headlines() -> List[dict]:
     payload = headlines[:12]
     set_cache('market_brief_headlines', payload)
     return payload
+
+
+def _market_context_snapshot() -> dict:
+    overview = market_overview()
+    themes = theme_dashboard()
+    etfs = etf_dashboard()
+    headlines = _collect_market_headlines()
+    brief_payload = market_brief()
+    return {
+        'overview_summary': overview.get('summary', {}),
+        'best_theme': themes.get('summary', {}).get('best_theme'),
+        'worst_theme': themes.get('summary', {}).get('worst_theme'),
+        'best_group': etfs.get('summary', {}).get('best_group'),
+        'risk_on_proxy': etfs.get('summary', {}).get('risk_on_proxy'),
+        'defensive_proxy': etfs.get('summary', {}).get('defensive_proxy'),
+        'market_headlines': headlines[:5],
+        'brief': brief_payload.get('brief', {}),
+    }
+
+
+def _earnings_tracker_for_deep_dive():
+    key = 'earnings_tracker_deep_dive'
+    cached = get_cached(key, ttl=300)
+    if cached:
+        return cached
+    tracker = get_earnings_tracker(days_ahead=45, limit=200, lookback_days=45)
+    set_cache(key, tracker)
+    return tracker
 
 
 @app.get('/')
@@ -228,7 +264,7 @@ def session_movers(session: str, min_move: float = Query(default=0.5), limit: in
 @app.get('/api/earnings-tracker')
 def earnings_tracker(days_ahead: int = Query(default=21), limit: int = Query(default=120)):
     key = f'earnings_tracker_{days_ahead}_{limit}'
-    cached = get_cached(key, ttl=120)
+    cached = get_cached(key, ttl=60)
     if cached:
         return cached
 
@@ -319,12 +355,73 @@ def watchlist_news(
     ticker_list = ticker_list[:40]
 
     key = f'watchlist_news_{"_".join(ticker_list)}_{limit_per_ticker}'
-    cached = get_cached(key, ttl=240)
+    cached = get_cached(key, ttl=60)
     if cached:
         return cached
     data = get_watchlist_news(ticker_list, limit_per_ticker=limit_per_ticker)
     set_cache(key, data)
     return data
+
+
+@app.get('/api/watchlist-thesis/{ticker}')
+def watchlist_thesis(ticker: str):
+    ticker = ticker.upper()
+    key = f'watchlist_thesis_{ticker}'
+    cached = get_cached(key, ttl=300)
+    if cached:
+        return cached
+
+    detail = get_stock_detail(ticker)
+    headlines = get_stock_news(ticker, company_name=detail.get('company_name') or ticker, limit=6)
+    market_context = _market_context_snapshot()
+    analysis = build_watchlist_thesis({
+        'detail': detail,
+        'headlines': headlines,
+        'market_context': market_context,
+    })
+    payload = {
+        'ticker': ticker,
+        'updated_at': datetime.now(timezone.utc).isoformat(),
+        'detail': detail,
+        'headlines': headlines,
+        'analysis': analysis,
+    }
+    set_cache(key, payload)
+    return payload
+
+
+@app.get('/api/earnings-deep-dive/{ticker}')
+def earnings_deep_dive(ticker: str):
+    ticker = ticker.upper()
+    key = f'earnings_deep_dive_{ticker}'
+    cached = get_cached(key, ttl=300)
+    if cached:
+        return cached
+
+    tracker = _earnings_tracker_for_deep_dive()
+    item = next((row for row in tracker.get('items', []) if row.get('ticker') == ticker), None)
+    detail = get_stock_detail(ticker)
+    headlines = get_stock_news(ticker, company_name=detail.get('company_name') or ticker, limit=6)
+    transcript = get_earnings_call_transcript(ticker, earnings_date=item.get('earnings_date') if item else None)
+    market_context = _market_context_snapshot()
+    analysis = build_earnings_deep_dive({
+        'earnings': item or {'ticker': ticker, 'company_name': detail.get('company_name') or ticker},
+        'detail': detail,
+        'headlines': headlines,
+        'transcript': transcript,
+        'market_context': market_context,
+    })
+    payload = {
+        'ticker': ticker,
+        'updated_at': datetime.now(timezone.utc).isoformat(),
+        'earnings': item,
+        'detail': detail,
+        'headlines': headlines,
+        'transcript': transcript,
+        'analysis': analysis,
+    }
+    set_cache(key, payload)
+    return payload
 
 
 @app.get('/api/reddit')

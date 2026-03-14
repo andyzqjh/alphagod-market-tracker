@@ -31,6 +31,7 @@
     { label: '1W', value: 'W' },
   ];
   const AUTO_REFRESH_MS = 300000;
+  const LIVE_PANEL_REFRESH_MS = 60000;
   const RRG_REFRESH_MS = 60000;
   const WATCHLIST_STORAGE_KEY = 'alphagod_dashboard_watchlist';
   const WATCHLIST_MAX_SIZE = 40;
@@ -66,6 +67,8 @@
     chartInterval: 'D',
     watchlistInput: '',
     watchlistTickers: [],
+    selectedWatchlistTicker: '',
+    selectedEarningsTicker: '',
     themeFilter: 'all',
     selectedTheme: '',
     overview: null,
@@ -80,6 +83,8 @@
     heatmap: null,
     news: null,
     watchlist: null,
+    watchlistInsights: {},
+    earningsInsights: {},
     chartWorkspace: null,
     loading: {
       overview: false,
@@ -94,6 +99,8 @@
       heatmap: false,
       news: false,
       watchlist: false,
+      watchlistInsight: false,
+      earningsInsight: false,
       chart: false,
     },
     errors: {},
@@ -168,6 +175,10 @@
       hour: 'numeric',
       minute: '2-digit',
     });
+  }
+
+  function multilineHtml(value) {
+    return esc(value).replace(/\n/g, '<br>');
   }
 
   function deltaClass(value) {
@@ -322,6 +333,63 @@
         <div class="tiny-copy">${esc(block.body || 'n/a')}</div>
       </div>
     `).join('');
+  }
+
+  function stanceClass(value) {
+    const tone = String(value || '').toLowerCase();
+    if (tone === 'bullish' || tone === 'better') return 'pos';
+    if (tone === 'cautious' || tone === 'worse') return 'neg';
+    return 'warn';
+  }
+
+  function criteriaClass(value) {
+    if (value === true) return 'pos';
+    if (value === false) return 'neg';
+    return 'warn';
+  }
+
+  function getSelectedWatchlistItem() {
+    const items = state.watchlist?.items || [];
+    if (!items.length) return null;
+    const selected = items.find((item) => item.ticker === state.selectedWatchlistTicker);
+    if (selected) return selected;
+    state.selectedWatchlistTicker = items[0].ticker;
+    return items[0];
+  }
+
+  function getSelectedEarningsItem() {
+    const items = state.earnings?.items || [];
+    if (!items.length) return null;
+    const selected = items.find((item) => item.ticker === state.selectedEarningsTicker);
+    if (selected) return selected;
+    const fallback = items.find((item) => item.reported_eps != null || item.status === 'Recent' || item.status === 'Today') || items[0];
+    state.selectedEarningsTicker = fallback.ticker;
+    return fallback;
+  }
+
+  function renderCriteriaGroup(group) {
+    const items = Array.isArray(group?.items) ? group.items : [];
+    return `
+      <section class="criteria-card">
+        <div class="desk-head">
+          <div>
+            <div class="section-kicker">${esc(group?.name || 'Criteria')}</div>
+            <h3>${esc(group?.passed_count ?? 0)}/${esc(group?.applicable_count ?? 0)} checks</h3>
+          </div>
+        </div>
+        <div class="criteria-list">
+          ${items.map((item) => `
+            <div class="criteria-row">
+              <div class="criteria-flag ${criteriaClass(item.passed)}">${item.passed === true ? 'PASS' : item.passed === false ? 'MISS' : 'PEND'}</div>
+              <div>
+                <div class="criteria-label">${esc(item.label || 'Check')}</div>
+                <div class="tiny-copy">${esc(item.note || '')}</div>
+              </div>
+            </div>
+          `).join('')}
+        </div>
+      </section>
+    `;
   }
 
   function chartSymbolFor(symbol) {
@@ -1384,6 +1452,13 @@
       .sort((a, b) => (reportTimeRank(a.report_time) - reportTimeRank(b.report_time))
         || (Math.abs(Number(b.change_pct || 0)) - Math.abs(Number(a.change_pct || 0))))
       .slice(0, 8);
+    const selectedItem = getSelectedEarningsItem();
+    const selectedInsight = selectedItem ? state.earningsInsights[selectedItem.ticker] : null;
+    const selectedAnalysis = selectedInsight?.analysis || {};
+    const transcript = selectedInsight?.transcript || {};
+    const transcriptCatalysts = selectedAnalysis.transcript_catalysts || transcript.catalysts || [];
+    const whatTheySaid = transcript.management_excerpt || transcript.digest || selectedItem?.what_they_said || selectedAnalysis.impact_news || '';
+    const qaExcerpt = transcript.qa_excerpt || '';
 
     const summaryHtml = state.loading.earnings && !earnings
       ? emptyState('Loading earnings tracker...')
@@ -1394,8 +1469,8 @@
             <div class="metric-card"><div class="metric-label">Recent</div><div class="metric-value">${earnings?.summary?.recent_count ?? '--'}</div><div class="metric-copy">Results that landed in the recent lookback window.</div></div>
             <div class="metric-card"><div class="metric-label">Upcoming</div><div class="metric-value">${earnings?.summary?.upcoming_count ?? '--'}</div><div class="metric-copy">Names with scheduled reports still ahead.</div></div>
             <div class="metric-card"><div class="metric-label">Today</div><div class="metric-value">${earnings?.summary?.today_count ?? '--'}</div><div class="metric-copy">Names scheduled to report today.</div></div>
-            <div class="metric-card"><div class="metric-label">Next 7 Days</div><div class="metric-value">${earnings?.summary?.next_7_days ?? '--'}</div><div class="metric-copy">Reports due over the next trading week.</div></div>
-            <div class="metric-card"><div class="metric-label">Top Theme</div><div class="metric-value" style="font-size:1.2rem;">${esc(earnings?.summary?.top_theme || '--')}</div><div class="metric-copy">Most represented tracked theme in the current slate.</div></div>
+            <div class="metric-card"><div class="metric-label">Reported</div><div class="metric-value">${earnings?.summary?.reported_count ?? '--'}</div><div class="metric-copy">Events already printing actual EPS inside the board.</div></div>
+            <div class="metric-card"><div class="metric-label">Positive Reaction</div><div class="metric-value">${earnings?.summary?.with_positive_reaction ?? '--'}</div><div class="metric-copy">Names with a positive live post-print reaction.</div></div>
           </div>
         `;
 
@@ -1438,47 +1513,151 @@
           'today',
           "No tracked names are scheduled for today in the current earnings window.",
         );
+    const focusHtml = state.loading.earnings && !earnings
+      ? emptyState('Building the earnings deep dive...')
+      : state.errors.earnings && !selectedItem
+        ? errorState(state.errors.earnings)
+        : selectedItem
+          ? `
+            <div class="deep-dive-surface">
+              <div class="focus-topline">
+                <div>
+                  <div class="symbol">${esc(selectedItem.ticker)}</div>
+                  <div class="focus-title-row">
+                    <h2>${esc(selectedItem.company_name || selectedItem.ticker)}</h2>
+                    <span class="soft-pill ${selectedItem.reported_eps != null ? 'pos' : selectedItem.status === 'Upcoming' ? 'warn' : ''}">${selectedItem.reported_eps != null ? 'Reported' : esc(selectedItem.status || 'Scheduled')}</span>
+                  </div>
+                </div>
+                <div class="pills">
+                  <span class="soft-pill ${stanceClass(selectedItem.stance)}">${esc(selectedItem.stance || 'Mixed')}</span>
+                  <span class="soft-pill ${deltaClass(selectedItem.display_change_pct)}">${esc(selectedItem.reaction_label || '1D')} ${fmtPercent(selectedItem.display_change_pct)}</span>
+                </div>
+              </div>
+                <div class="focus-quote-row">
+                  <div class="focus-price">${fmtPrice(selectedItem.display_price)}</div>
+                  <div class="focus-submeta">
+                    <span>${esc(selectedItem.earnings_date_display || 'n/a')}</span>
+                    <span>${fmtMarketCap(selectedItem.market_cap)}</span>
+                    <span>${esc((selectedItem.themes || []).join(' / ') || 'General')}</span>
+                    <span>${esc(selectedItem.criteria_score || 'n/a')} EP checks</span>
+                    <span>${esc(transcript.status === 'available' ? `${transcript.source_label || 'Transcript'} ${transcript.quarter || ''}`.trim() : transcript.source_label || 'Transcript unavailable')}</span>
+                  </div>
+                </div>
+              <div class="focus-metrics">
+                <div class="focus-metric-card">
+                  <div class="metric-label">EPS</div>
+                  <div class="metric-value">${selectedItem.reported_eps != null ? fmtNumber(selectedItem.reported_eps) : 'Awaiting'}</div>
+                  <div class="metric-copy">Estimate ${selectedItem.eps_estimate != null ? fmtNumber(selectedItem.eps_estimate) : 'n/a'}</div>
+                </div>
+                <div class="focus-metric-card">
+                  <div class="metric-label">Surprise</div>
+                  <div class="metric-value ${deltaClass(selectedItem.surprise_pct)}">${fmtPercent(selectedItem.surprise_pct)}</div>
+                  <div class="metric-copy">Street reset versus published EPS estimate.</div>
+                </div>
+                <div class="focus-metric-card">
+                  <div class="metric-label">Live Reaction</div>
+                  <div class="metric-value ${deltaClass(selectedItem.display_change_pct)}">${fmtPercent(selectedItem.display_change_pct)}</div>
+                  <div class="metric-copy">${esc(selectedItem.display_session_label || 'Regular')} tape response.</div>
+                </div>
+                <div class="focus-metric-card">
+                  <div class="metric-label">RVol</div>
+                  <div class="metric-value">${fmtRvol(selectedItem.rvol)}</div>
+                  <div class="metric-copy">Current volume versus average volume.</div>
+                </div>
+              </div>
+              <section class="focus-callout">
+                <div class="section-kicker">Narrative Shift</div>
+                <div class="focus-copy">${esc(selectedAnalysis.what_changed_after || selectedItem.narrative_shift || 'No narrative shift is available yet.')}</div>
+              </section>
+              <div class="focus-split">
+                <section class="focus-panel">
+                  <div class="section-kicker">Market Perception Before</div>
+                  <div class="focus-copy">${esc(selectedAnalysis.market_perception_before || selectedItem.before_earnings || 'Waiting for the pre-report setup read.')}</div>
+                </section>
+                <section class="focus-panel focus-panel-accent">
+                  <div class="section-kicker">What Changed After Earnings</div>
+                  <div class="focus-copy">${esc(selectedAnalysis.what_changed_after || selectedItem.after_earnings || 'Waiting for the post-report reaction read.')}</div>
+                </section>
+              </div>
+              <div class="focus-split">
+                <section class="focus-panel">
+                  <div class="section-kicker">Market View</div>
+                  <div class="focus-copy">${esc(selectedAnalysis.market_view || selectedItem.analyst_view || 'Market view is not available yet.')}</div>
+                </section>
+                <section class="focus-panel">
+                  <div class="section-kicker">Impact News</div>
+                  <div class="focus-copy">${esc(selectedAnalysis.impact_news || selectedItem.what_they_said || 'Impact news is not available yet.')}</div>
+                </section>
+              </div>
+              <section class="focus-panel">
+                <div class="section-kicker">What They Said</div>
+                <div class="focus-copy focus-copy-pre">${multilineHtml(whatTheySaid || 'No source summary is available yet.')}</div>
+              </section>
+              <section class="focus-panel">
+                <div class="section-kicker">Transcript Catalysts</div>
+                <div class="quote-list">
+                  ${transcriptCatalysts.map((catalyst) => `
+                    <div class="quote-card-dark">
+                      <div class="mini-label">${esc(catalyst.title || catalyst.theme || 'Catalyst')}</div>
+                      <div class="quote-snippet">${esc(catalyst.quote || '')}</div>
+                      <div class="tiny-copy">${esc(catalyst.why_it_matters || '')}</div>
+                    </div>
+                  `).join('') || `<div class="empty-state">Transcript catalysts will appear here when a transcript source is available.</div>`}
+                </div>
+              </section>
+              ${qaExcerpt ? `
+                <div class="focus-split">
+                  <section class="focus-panel">
+                    <div class="section-kicker">Management Excerpt</div>
+                    <div class="focus-copy focus-copy-pre">${multilineHtml(transcript.management_excerpt || transcript.digest || 'Transcript excerpt unavailable.')}</div>
+                  </section>
+                  <section class="focus-panel">
+                    <div class="section-kicker">Q&amp;A Excerpt</div>
+                    <div class="focus-copy focus-copy-pre">${multilineHtml(qaExcerpt)}</div>
+                  </section>
+                </div>
+              ` : ''}
+              <div class="criteria-grid">
+                ${(selectedItem.criteria_sets || []).map((group) => renderCriteriaGroup(group)).join('') || emptyState('EP criteria are not available yet.')}
+              </div>
+              <div class="focus-split">
+                <section class="focus-panel focus-panel-wide">
+                  <div class="section-kicker">Desk View Today</div>
+                  <div class="focus-copy">${esc(selectedAnalysis.today_view || selectedItem.ai_reasoning || selectedItem.reasoning || 'AI reasoning is not available yet.')}</div>
+                </section>
+                <section class="focus-panel">
+                  <div class="section-kicker">Bull / Bear</div>
+                  <div class="focus-list">
+                    <div class="focus-list-row">${esc(selectedAnalysis.bull_case || 'Bull case is not available yet.')}</div>
+                    <div class="focus-list-row">${esc(selectedAnalysis.bear_case || 'Bear case is not available yet.')}</div>
+                    <div class="focus-list-row">${esc(selectedAnalysis.thesis_breaker || 'Thesis breaker is not available yet.')}</div>
+                  </div>
+                  <div class="focus-action-row">
+                    <button class="small-btn" data-open-desk="${esc(selectedItem.ticker)}">Open Chart Desk</button>
+                  </div>
+                </section>
+              </div>
+              ${(state.loading.earningsInsight && !selectedInsight) ? '<div class="tiny-copy">Loading transcript and market reasoning...</div>' : state.errors.earningsInsight ? `<div class="tiny-copy">${esc(state.errors.earningsInsight)}</div>` : ''}
+            </div>
+          `
+          : emptyState('No earnings names are available to inspect yet.');
 
-    const tableHtml = items.length
+    const railHtml = items.length
       ? `
-        <div class="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Ticker</th>
-                <th>Company</th>
-                <th>Date</th>
-                <th>Status</th>
-                <th>EPS Est</th>
-                <th>Reported</th>
-                <th>Surprise</th>
-                <th>1D %</th>
-                <th>Themes</th>
-                <th>AI / Event Read</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              ${items.map((item) => `
-                <tr>
-                  <td><button class="chip-btn clicker mono" data-open-desk="${esc(item.ticker)}">${esc(item.ticker)}</button></td>
-                  <td>${esc(item.company_name || item.ticker)}</td>
-                  <td>
-                    <div>${esc(item.earnings_date_display || 'n/a')}</div>
-                    <div class="tiny-copy">${esc(item.event_source_label || 'Yahoo earnings feed')}</div>
-                  </td>
-                  <td><span class="soft-pill ${item.status === 'Today' ? 'warn' : item.status === 'Upcoming' ? 'pos' : ''}">${esc(item.status || 'Scheduled')}</span></td>
-                  <td>${item.eps_estimate != null ? item.eps_estimate.toFixed(2) : 'n/a'}</td>
-                  <td>${item.reported_eps != null ? item.reported_eps.toFixed(2) : 'n/a'}</td>
-                  <td class="${deltaClass(item.surprise_pct)}">${fmtPercent(item.surprise_pct)}</td>
-                  <td class="${deltaClass(item.change_pct)}">${fmtPercent(item.change_pct)}</td>
-                  <td>${esc((item.themes || []).join(', ') || 'None')}</td>
-                  <td style="min-width:320px; color: var(--muted);">${esc(item.reasoning || 'n/a')}</td>
-                  <td><button class="small-btn" data-open-desk="${esc(item.ticker)}">Chart Desk</button></td>
-                </tr>
-              `).join('')}
-            </tbody>
-          </table>
+        <div class="focus-rail">
+          ${items.map((item) => `
+            <button class="focus-rail-item ${selectedItem?.ticker === item.ticker ? 'active' : ''}" data-earnings-select="${esc(item.ticker)}">
+              <div>
+                <div class="symbol">${esc(item.ticker)}</div>
+                <div class="focus-rail-title">${esc(item.company_name || item.ticker)}</div>
+                <div class="tiny-copy">${esc(item.earnings_date_display || 'n/a')}</div>
+              </div>
+              <div style="text-align:right;">
+                <div class="${deltaClass(item.display_change_pct)}" style="font-weight:700;">${fmtPercent(item.display_change_pct)}</div>
+                <div class="tiny-copy">${esc(item.reaction_label || '1D')} | ${esc(item.criteria_score || 'n/a')}</div>
+              </div>
+            </button>
+          `).join('')}
         </div>
       `
       : emptyState('No recent or upcoming earnings rows were returned yet. If the provider is late, try refresh again in a few minutes.');
@@ -1488,9 +1667,9 @@
         <section class="panel section">
           <div class="section-head">
             <div>
-              <div class="section-kicker">Earnings Tracker</div>
-              <h2>Yesterday's reviews and today's earnings setup</h2>
-              <p>Split the board into what just happened, what is due today, and the reasons the market appears to care so the tab reads more like a trader's review sheet than a calendar dump.</p>
+              <div class="section-kicker">S&amp;P Earnings</div>
+              <h2>Earnings gap scanner with before/after reasoning</h2>
+              <p>Scan recent and upcoming reports, then drill into how the market viewed the name before earnings, what changed after the print, and how closely the setup matches EP-style criteria.</p>
             </div>
             <button class="action-btn" data-refresh="earnings">Refresh Earnings</button>
           </div>
@@ -1517,15 +1696,28 @@
           </div>
           ${todayHtml}
         </section>
-        <section class="panel section">
-          <div class="section-head">
-            <div>
-              <div class="section-kicker">Calendar</div>
-              <h2>Earnings slate</h2>
-              <p>Sorted by the nearest earnings event returned inside the recent-plus-upcoming window.</p>
+        <section class="earnings-workspace">
+          <section class="panel section">
+            <div class="section-head">
+              <div>
+                <div class="section-kicker">Gap Scanner</div>
+                <h2>Selected earnings deep dive</h2>
+                <p>Live quote header, narrative shift, AI reasoning, and EP criteria all sit in one card so you can decide quickly whether the move is just a beat or a real reset.</p>
+              </div>
+              <span class="soft-pill warn">Updated ${fmtDateTime(earnings?.updated_at)}</span>
             </div>
-          </div>
-          ${tableHtml}
+            ${focusHtml}
+          </section>
+          <aside class="panel section">
+            <div class="section-head">
+              <div>
+                <div class="section-kicker">Slate</div>
+                <h2>Recent and upcoming names</h2>
+                <p>Click a ticker to swap the deep dive without leaving the scanner.</p>
+              </div>
+            </div>
+            ${railHtml}
+          </aside>
         </section>
       </div>
     `;
@@ -1750,44 +1942,14 @@
     `;
   }
 
-  function renderWatchlistCard(item) {
-    const headlines = item?.headlines || [];
-    return `
-      <section class="watchlist-card">
-        <div class="desk-head">
-          <div>
-            <div class="symbol">${esc(item.ticker)}</div>
-            <div class="title">${esc(item.company_name || item.ticker)}</div>
-          </div>
-          <div class="pills">
-            <span class="soft-pill ${deltaClass(item.change_pct)}">${fmtPercent(item.change_pct)}</span>
-            <span class="soft-pill">${fmtPrice(item.price)}</span>
-            <span class="soft-pill ${item.has_verified_headline ? 'pos' : 'warn'}">${item.has_verified_headline ? 'Verified feed' : 'Recent feed'}</span>
-          </div>
-        </div>
-        <div class="watchlist-meta">
-          <span class="soft-pill">${esc(item.sector || 'Sector n/a')}</span>
-          <span class="soft-pill">${esc(item.industry || 'Industry n/a')}</span>
-          <span class="soft-pill">${fmtRvol(item.rvol)}</span>
-          <span class="soft-pill">${fmtMarketCap(item.market_cap)}</span>
-        </div>
-        <div class="watchlist-actions">
-          <button class="small-btn" data-open-desk="${esc(item.ticker)}">Open Chart Desk</button>
-          <a class="small-btn news-link-btn" href="${esc(item.x_search_url || '#')}" target="_blank" rel="noreferrer">Open on X</a>
-          <button class="small-btn" data-watchlist-remove="${esc(item.ticker)}">Remove</button>
-        </div>
-        <div class="watchlist-note">${item.has_verified_headline ? 'Showing verified matched headlines for this ticker.' : 'Showing the most recent matched headlines returned for this ticker. X is linked out, not scraped directly.'}</div>
-        <div class="headline-list">
-          ${headlines.length ? headlines.map((headline) => renderWatchlistHeadline(headline)).join('') : `<div class="empty-state">No recent ticker-specific headlines were returned for ${esc(item.ticker)}.</div>`}
-        </div>
-      </section>
-    `;
-  }
-
   function renderWatchlistTab() {
     const watchlist = state.watchlist;
     const summary = watchlist?.summary || {};
     const items = watchlist?.items || [];
+    const selectedItem = getSelectedWatchlistItem();
+    const selectedInsight = selectedItem ? state.watchlistInsights[selectedItem.ticker] : null;
+    const selectedAnalysis = selectedInsight?.analysis || {};
+    const selectedHeadlines = selectedInsight?.headlines || selectedItem?.catalysts || [];
     const hasTickers = state.watchlistTickers.length > 0;
     const chipsHtml = state.watchlistTickers.length
       ? state.watchlistTickers.map((ticker) => `
@@ -1808,18 +1970,142 @@
             <div class="metrics-4">
               <div class="metric-card"><div class="metric-label">Tickers</div><div class="metric-value">${summary.total_tickers ?? '--'}</div><div class="metric-copy">Saved symbols inside your watchlist.</div></div>
               <div class="metric-card"><div class="metric-label">With News</div><div class="metric-value">${summary.with_news_count ?? '--'}</div><div class="metric-copy">Names returning recent matched headlines.</div></div>
-              <div class="metric-card"><div class="metric-label">Verified</div><div class="metric-value">${summary.with_verified_news_count ?? '--'}</div><div class="metric-copy">Names with verified matched headlines.</div></div>
-              <div class="metric-card"><div class="metric-label">Latest Headline</div><div class="metric-value" style="font-size:1.15rem;">${summary.latest_headline_at ? fmtDateTime(summary.latest_headline_at) : '--'}</div><div class="metric-copy">${summary.total_headlines ?? 0} headlines currently displayed.</div></div>
+              <div class="metric-card"><div class="metric-label">Bullish / Cautious</div><div class="metric-value">${summary.bullish_count ?? 0} / ${summary.cautious_count ?? 0}</div><div class="metric-copy">Quick split of thesis cards by stance.</div></div>
+              <div class="metric-card"><div class="metric-label">Latest Headline</div><div class="metric-value" style="font-size:1.15rem;">${summary.latest_headline_at ? fmtDateTime(summary.latest_headline_at) : '--'}</div><div class="metric-copy">${summary.total_headlines ?? 0} matched headlines currently displayed.</div></div>
             </div>
           `;
 
-    const cardsHtml = !hasTickers
+    const focusHtml = !hasTickers
       ? emptyState('Add symbols like NVDA, TSLA, ORCL, MRNA, or any names you want to monitor.')
       : state.loading.watchlist && !watchlist
         ? emptyState('Loading watchlist cards...')
-        : state.errors.watchlist && !items.length
+        : state.errors.watchlist && !selectedItem
           ? errorState(state.errors.watchlist)
-          : items.map((item) => renderWatchlistCard(item)).join('') || emptyState('No watchlist cards are available right now.');
+          : selectedItem
+            ? `
+              <div class="deep-dive-surface">
+                <div class="focus-topline">
+                  <div>
+                    <div class="symbol">${esc(selectedItem.ticker)}</div>
+                    <div class="focus-title-row">
+                      <h2>${esc(selectedItem.company_name || selectedItem.ticker)}</h2>
+                      <span class="soft-pill ${stanceClass(selectedItem.stance)}">${esc(selectedItem.stance || 'Neutral')}</span>
+                    </div>
+                  </div>
+                  <div class="pills">
+                    <span class="soft-pill ${deltaClass(selectedItem.change_pct)}">${esc(selectedItem.display_session || '1D')} ${fmtPercent(selectedItem.change_pct)}</span>
+                    <span class="soft-pill ${selectedItem.has_verified_headline ? 'pos' : 'warn'}">${selectedItem.has_verified_headline ? 'Verified feed' : 'Recent feed'}</span>
+                  </div>
+                </div>
+                <div class="focus-quote-row">
+                  <div class="focus-price">${fmtPrice(selectedItem.price)}</div>
+                  <div class="focus-submeta">
+                    <span>${fmtMarketCap(selectedItem.market_cap)}</span>
+                    <span>${esc(selectedItem.sector || 'Sector n/a')}</span>
+                    <span>${esc((selectedItem.themes || []).join(' / ') || selectedItem.industry || 'General')}</span>
+                    <span>${fmtRvol(selectedItem.rvol)}</span>
+                  </div>
+                </div>
+                <section class="focus-callout">
+                  <div class="section-kicker">What The Market Is Pricing For</div>
+                  <div class="focus-copy">${esc(selectedAnalysis.what_market_is_pricing_for || selectedItem.what_market_is_pricing_for || 'No thesis read is available yet.')}</div>
+                </section>
+                <section class="focus-panel">
+                  <div class="section-kicker">Market View</div>
+                  <div class="focus-copy">${esc(selectedAnalysis.market_view || selectedItem.core_thesis || 'No thesis write-up is available yet.')}</div>
+                </section>
+                <div class="pillar-grid">
+                  ${(selectedItem.pillars || []).map((pillar) => `
+                    <section class="focus-panel">
+                      <div class="section-kicker">${esc(pillar.title || 'Pillar')}</div>
+                      <div class="focus-copy">${esc(pillar.body || 'n/a')}</div>
+                    </section>
+                  `).join('')}
+                </div>
+                <div class="focus-split">
+                  <section class="focus-panel">
+                    <div class="section-kicker">Catalysts</div>
+                    <div class="headline-list">
+                      ${selectedHeadlines.map((headline) => `
+                        <a class="headline-item" href="${esc(headline.url || '#')}" target="_blank" rel="noreferrer">
+                          <div style="display:flex;justify-content:space-between;gap:12px;align-items:flex-start;">
+                            <div style="font-weight:600;">${esc(headline.title || 'Headline')}</div>
+                            <span class="soft-pill ${headline.verified ? 'pos' : 'warn'}">${headline.verified ? 'Verified' : 'Recent'}</span>
+                          </div>
+                          <div class="tiny-copy" style="margin-top:6px;">${esc(headline.source || 'News feed')} | ${fmtDateTime(headline.published_at)}</div>
+                          <div style="margin-top:8px;color:var(--muted);">${esc(headline.note || 'n/a')}</div>
+                        </a>
+                      `).join('') || emptyState('No matched catalysts were returned for this ticker yet.')}
+                    </div>
+                  </section>
+                  <section class="focus-panel">
+                    <div class="section-kicker">Risk Frame</div>
+                    <div class="focus-list">
+                      ${(selectedItem.risks || []).map((risk) => `<div class="focus-list-row">${esc(risk)}</div>`).join('') || emptyState('No risks were returned yet.')}
+                    </div>
+                  </section>
+                </div>
+                <div class="focus-split">
+                  <section class="focus-panel">
+                    <div class="section-kicker">Bullish Case</div>
+                    <div class="focus-copy">${esc(selectedAnalysis.bull_case || selectedItem.analyst_view || 'Bull case is not available yet.')}</div>
+                  </section>
+                  <section class="focus-panel">
+                    <div class="section-kicker">Bearish / Negative</div>
+                    <div class="focus-copy">${esc(selectedAnalysis.bear_case || selectedAnalysis.key_negatives || selectedItem.decision_frame || 'Bear case is not available yet.')}</div>
+                  </section>
+                </div>
+                <div class="focus-split">
+                  <section class="focus-panel">
+                    <div class="section-kicker">Impact News</div>
+                    <div class="focus-copy">${esc(selectedAnalysis.impact_news || selectedItem.analyst_view || 'Impact news is not available yet.')}</div>
+                  </section>
+                  <section class="focus-panel">
+                    <div class="section-kicker">Key Negatives</div>
+                    <div class="focus-copy">${esc(selectedAnalysis.key_negatives || selectedAnalysis.bear_case || 'Key negatives are not available yet.')}</div>
+                  </section>
+                </div>
+                <div class="focus-split">
+                  <section class="focus-panel">
+                    <div class="section-kicker">Today View</div>
+                    <div class="focus-copy">${esc(selectedAnalysis.today_view || selectedAnalysis.market_view || 'Today view is not available yet.')}</div>
+                  </section>
+                  <section class="focus-panel">
+                    <div class="section-kicker">What Makes It Moot</div>
+                    <div class="focus-copy">${esc(selectedAnalysis.investment_moot || selectedItem.decision_frame || 'Mute conditions are not available yet.')}</div>
+                    <div class="focus-action-row">
+                      <button class="small-btn" data-open-desk="${esc(selectedItem.ticker)}">Open Chart Desk</button>
+                      <a class="small-btn news-link-btn" href="${esc(selectedItem.x_search_url || '#')}" target="_blank" rel="noreferrer">Open on X</a>
+                      <button class="small-btn" data-watchlist-remove="${esc(selectedItem.ticker)}">Remove</button>
+                    </div>
+                  </section>
+                </div>
+                ${(state.loading.watchlistInsight && !selectedInsight) ? '<div class="tiny-copy">Loading market view and thesis reasoning...</div>' : state.errors.watchlistInsight ? `<div class="tiny-copy">${esc(state.errors.watchlistInsight)}</div>` : ''}
+              </div>
+            `
+            : emptyState('No watchlist cards are available right now.');
+
+    const railHtml = !hasTickers
+      ? emptyState('Add symbols to populate the watchlist rail.')
+      : items.length
+        ? `
+          <div class="focus-rail">
+            ${items.map((item) => `
+              <button class="focus-rail-item ${selectedItem?.ticker === item.ticker ? 'active' : ''}" data-watchlist-select="${esc(item.ticker)}">
+                <div>
+                  <div class="symbol">${esc(item.ticker)}</div>
+                  <div class="focus-rail-title">${esc(item.company_name || item.ticker)}</div>
+                  <div class="tiny-copy">${esc(item.stance || 'Neutral')} | ${esc(item.display_session || '1D')}</div>
+                </div>
+                <div style="text-align:right;">
+                  <div class="${deltaClass(item.change_pct)}" style="font-weight:700;">${fmtPercent(item.change_pct)}</div>
+                  <div class="tiny-copy">${fmtPrice(item.price)}</div>
+                </div>
+              </button>
+            `).join('')}
+          </div>
+        `
+        : emptyState('No watchlist cards are available right now.');
 
     return `
       <div class="main-stack">
@@ -1827,8 +2113,8 @@
           <div class="section-head">
             <div>
               <div class="section-kicker">Watchlist</div>
-              <h2>Save your tickers and monitor their latest news</h2>
-              <p>Add one or many symbols, keep them saved in this browser, and pull the latest matched headlines for each stock in one board. Each card also gives you a direct X search link for manual tape checks.</p>
+              <h2>Save your tickers and work them like thesis cards</h2>
+              <p>Add your names once, then use the deep dive to see what the market is pricing for, the core thesis, the latest catalysts, and the decision frame beside a live quote header.</p>
             </div>
             <button class="action-btn" data-refresh="watchlist">Refresh Watchlist</button>
           </div>
@@ -1843,8 +2129,28 @@
           <div class="watchlist-chip-row">${chipsHtml}</div>
           ${summaryHtml}
         </section>
-        <section class="watchlist-grid">
-          ${cardsHtml}
+        <section class="watchlist-workspace">
+          <section class="panel section">
+            <div class="section-head">
+              <div>
+                <div class="section-kicker">Focus Card</div>
+                <h2>Selected watchlist thesis</h2>
+                <p>Closer to a real watchlist notebook: one name gets the full write-up, while the rest stay accessible in the side rail.</p>
+              </div>
+              <span class="soft-pill warn">Updated ${fmtDateTime(watchlist?.updated_at)}</span>
+            </div>
+            ${focusHtml}
+          </section>
+          <aside class="panel section">
+            <div class="section-head">
+              <div>
+                <div class="section-kicker">Your Names</div>
+                <h2>Watchlist rail</h2>
+                <p>Click any saved ticker to swap the thesis card.</p>
+              </div>
+            </div>
+            ${railHtml}
+          </aside>
         </section>
       </div>
     `;
@@ -2111,7 +2417,15 @@
     state.errors.earnings = '';
     render();
     try {
-      state.earnings = await api('/api/earnings-tracker', 150000);
+      state.earnings = await api('/api/earnings-tracker?limit=24');
+      const items = state.earnings?.items || [];
+      if (items.length && !items.some((item) => item.ticker === state.selectedEarningsTicker)) {
+        const preferred = items.find((item) => item.reported_eps != null || item.status === 'Recent' || item.status === 'Today') || items[0];
+        state.selectedEarningsTicker = preferred?.ticker || '';
+      }
+      if (state.selectedEarningsTicker) {
+        loadEarningsInsight(state.selectedEarningsTicker, force);
+      }
     } catch (error) {
       console.error(error);
       state.errors.earnings = 'Unable to load the earnings tracker right now.';
@@ -2175,9 +2489,12 @@
           with_verified_news_count: 0,
           latest_headline_at: null,
           total_headlines: 0,
+          bullish_count: 0,
+          cautious_count: 0,
         },
         items: [],
       };
+      state.selectedWatchlistTicker = '';
       state.errors.watchlist = '';
       render();
       return;
@@ -2189,11 +2506,56 @@
     try {
       const tickers = encodeURIComponent(state.watchlistTickers.join(','));
       state.watchlist = await api(`/api/watchlist-news?tickers=${tickers}&limit_per_ticker=3`);
+      const items = state.watchlist?.items || [];
+      if (items.length && !items.some((item) => item.ticker === state.selectedWatchlistTicker)) {
+        state.selectedWatchlistTicker = items[0]?.ticker || '';
+      }
+      if (state.selectedWatchlistTicker) {
+        loadWatchlistInsight(state.selectedWatchlistTicker, force);
+      }
     } catch (error) {
       console.error(error);
       state.errors.watchlist = 'Unable to load the watchlist news board right now.';
     } finally {
       state.loading.watchlist = false;
+      render();
+    }
+  }
+  async function loadWatchlistInsight(ticker, force = false) {
+    const clean = String(ticker || '').trim().toUpperCase();
+    if (!clean) return;
+    if (!force && state.watchlistInsights[clean]) return;
+    if (state.loading.watchlistInsight && !force) return;
+    state.loading.watchlistInsight = true;
+    state.errors.watchlistInsight = '';
+    render();
+    try {
+      const payload = await api(`/api/watchlist-thesis/${encodeURIComponent(clean)}`);
+      state.watchlistInsights = { ...state.watchlistInsights, [clean]: payload };
+    } catch (error) {
+      console.error(error);
+      state.errors.watchlistInsight = 'Unable to load the watchlist thesis reasoning right now.';
+    } finally {
+      state.loading.watchlistInsight = false;
+      render();
+    }
+  }
+  async function loadEarningsInsight(ticker, force = false) {
+    const clean = String(ticker || '').trim().toUpperCase();
+    if (!clean) return;
+    if (!force && state.earningsInsights[clean]) return;
+    if (state.loading.earningsInsight && !force) return;
+    state.loading.earningsInsight = true;
+    state.errors.earningsInsight = '';
+    render();
+    try {
+      const payload = await api(`/api/earnings-deep-dive/${encodeURIComponent(clean)}`);
+      state.earningsInsights = { ...state.earningsInsights, [clean]: payload };
+    } catch (error) {
+      console.error(error);
+      state.errors.earningsInsight = 'Unable to load the earnings deep dive right now.';
+    } finally {
+      state.loading.earningsInsight = false;
       render();
     }
   }
@@ -2226,6 +2588,7 @@
       if (state.activeTab === 'heatmap' && !state.heatmap) loadHeatmap();
       if (state.activeTab === 'news' && !state.news) loadNews();
       if (state.activeTab === 'watchlist' && !state.watchlist && state.watchlistTickers.length) loadWatchlist();
+      if (state.activeTab === 'watchlist' && state.selectedWatchlistTicker && !state.watchlistInsights[state.selectedWatchlistTicker]) loadWatchlistInsight(state.selectedWatchlistTicker);
       if (state.activeTab === 'premarket' && !state.premarket) loadPremarket();
       if (state.activeTab === 'postmarket' && !state.postmarket) loadPostmarket();
       if (state.activeTab === 'themes' && !state.themes) loadThemes();
@@ -2234,6 +2597,7 @@
       if (state.activeTab === 'monitor' && !state.monitor) loadMonitor();
       if (state.activeTab === 'chart' && !state.chartWorkspace) loadChartWorkspace(state.chartSymbol);
       if (state.activeTab === 'earnings' && !state.earnings) loadEarnings();
+      if (state.activeTab === 'earnings' && state.selectedEarningsTicker && !state.earningsInsights[state.selectedEarningsTicker]) loadEarningsInsight(state.selectedEarningsTicker);
       return;
     }
 
@@ -2250,7 +2614,13 @@
       if (target === 'monitor') loadMonitor(true);
       if (target === 'heatmap') loadHeatmap(true);
       if (target === 'news') loadNews(true);
-      if (target === 'watchlist') loadWatchlist(true);
+      if (target === 'watchlist') {
+        loadWatchlist(true);
+        if (state.selectedWatchlistTicker) loadWatchlistInsight(state.selectedWatchlistTicker, true);
+      }
+      if (target === 'earnings') {
+        if (state.selectedEarningsTicker) loadEarningsInsight(state.selectedEarningsTicker, true);
+      }
       return;
     }
 
@@ -2268,6 +2638,22 @@
       return;
     }
 
+    const watchlistSelectButton = event.target.closest('[data-watchlist-select]');
+    if (watchlistSelectButton) {
+      state.selectedWatchlistTicker = watchlistSelectButton.dataset.watchlistSelect;
+      render();
+      loadWatchlistInsight(state.selectedWatchlistTicker);
+      return;
+    }
+
+    const earningsSelectButton = event.target.closest('[data-earnings-select]');
+    if (earningsSelectButton) {
+      state.selectedEarningsTicker = earningsSelectButton.dataset.earningsSelect;
+      render();
+      loadEarningsInsight(state.selectedEarningsTicker);
+      return;
+    }
+
     if (event.target.closest('[data-watchlist-add]')) {
       mergeWatchlistFromInput();
       return;
@@ -2281,6 +2667,7 @@
     if (event.target.closest('[data-watchlist-clear]')) {
       setWatchlistTickers([]);
       state.watchlist = null;
+      state.selectedWatchlistTicker = '';
       state.errors.watchlist = '';
       render();
       return;
@@ -2291,6 +2678,7 @@
       const ticker = watchlistRemoveButton.dataset.watchlistRemove;
       setWatchlistTickers(state.watchlistTickers.filter((item) => item !== ticker));
       state.watchlist = null;
+      if (state.selectedWatchlistTicker === ticker) state.selectedWatchlistTicker = '';
       state.errors.watchlist = '';
       render();
       if (state.watchlistTickers.length) {
@@ -2352,22 +2740,36 @@
     loadBrief();
     loadThemes();
     loadEtfs();
+    loadRrg();
+    loadChartWorkspace(state.chartSymbol);
     document.addEventListener('click', handleClick);
     document.addEventListener('input', handleInput);
     document.addEventListener('keydown', handleKeydown);
     window.setInterval(setClock, 1000);
-    window.setInterval(() => loadOverviewBundle(true), AUTO_REFRESH_MS);
+    window.setInterval(() => loadOverviewBundle(true), LIVE_PANEL_REFRESH_MS);
     window.setInterval(() => { if (state.premarket) loadPremarket(true); }, AUTO_REFRESH_MS);
     window.setInterval(() => { if (state.postmarket) loadPostmarket(true); }, AUTO_REFRESH_MS);
-    window.setInterval(() => { if (state.themes) loadThemes(true); }, AUTO_REFRESH_MS);
-    window.setInterval(() => { if (state.etfs) loadEtfs(true); }, AUTO_REFRESH_MS);
-    window.setInterval(() => { if (state.rrg) loadRrg(true); }, RRG_REFRESH_MS);
-    window.setInterval(() => { if (state.earnings) loadEarnings(true); }, AUTO_REFRESH_MS);
+    window.setInterval(() => loadThemes(true), AUTO_REFRESH_MS);
+    window.setInterval(() => loadEtfs(true), AUTO_REFRESH_MS);
+    window.setInterval(() => loadRrg(true), RRG_REFRESH_MS);
+    window.setInterval(() => { if (state.earnings || state.activeTab === 'earnings') loadEarnings(true); }, LIVE_PANEL_REFRESH_MS);
     window.setInterval(() => { if (state.monitor) loadMonitor(true); }, AUTO_REFRESH_MS);
     window.setInterval(() => { if (state.heatmap) loadHeatmap(true); }, AUTO_REFRESH_MS);
     window.setInterval(() => { if (state.news) loadNews(true); }, AUTO_REFRESH_MS);
-    window.setInterval(() => { if (state.watchlistTickers.length) loadWatchlist(true); }, AUTO_REFRESH_MS);
+    window.setInterval(() => { if (state.watchlistTickers.length) loadWatchlist(true); }, LIVE_PANEL_REFRESH_MS);
     window.setInterval(() => loadBrief(true), AUTO_REFRESH_MS);
+    window.setTimeout(() => {
+      if (state.heatmap || state.loading.heatmap) return;
+      loadHeatmap().then(() => {
+        if (!state.news && !state.loading.news) {
+          loadNews();
+        }
+      });
+    }, 1500);
+    window.setTimeout(() => {
+      if (!state.watchlistTickers.length || state.watchlist || state.loading.watchlist) return;
+      loadWatchlist();
+    }, 2800);
   }
 
   boot();

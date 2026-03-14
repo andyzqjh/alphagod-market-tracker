@@ -1090,6 +1090,234 @@ def _build_x_search_url(ticker: str, company_name: Optional[str] = None) -> str:
     return f'https://x.com/search?q={url_quote(query, safe="")}&src=typed_query&f=live'
 
 
+def _contains_any(text: str, terms: List[str]) -> bool:
+    lower = str(text or '').lower()
+    return any(term in lower for term in terms)
+
+
+def _headline_text_blob(headlines: List[dict]) -> str:
+    return ' '.join(
+        f"{item.get('title') or ''} {item.get('summary') or ''}"
+        for item in headlines[:5]
+    ).lower()
+
+
+def _live_quote_view(data: dict) -> dict:
+    pre_price = data.get('premarket_price')
+    if pre_price is None:
+        pre_price = data.get('pre_market_price')
+    pre_change = data.get('premarket_pct')
+    if pre_change is None:
+        pre_change = data.get('pre_market_change_pct')
+
+    post_price = data.get('postmarket_price')
+    if post_price is None:
+        post_price = data.get('post_market_price')
+    post_change = data.get('postmarket_pct')
+    if post_change is None:
+        post_change = data.get('post_market_change_pct')
+
+    regular_price = data.get('price')
+    regular_change = data.get('change_pct')
+
+    display_price = regular_price
+    display_change = regular_change
+    session = '1D'
+    session_label = 'Regular'
+
+    if pre_price is not None:
+        display_price = pre_price
+        display_change = pre_change
+        session = 'PM'
+        session_label = 'Pre-market'
+    elif post_price is not None:
+        display_price = post_price
+        display_change = post_change
+        session = 'AH'
+        session_label = 'After-hours'
+
+    return {
+        'display_price': display_price,
+        'display_change_pct': display_change,
+        'display_session': session,
+        'display_session_label': session_label,
+        'regular_price': regular_price,
+        'regular_change_pct': regular_change,
+        'pre_market_price': pre_price,
+        'pre_market_change_pct': pre_change,
+        'post_market_price': post_price,
+        'post_market_change_pct': post_change,
+    }
+
+
+def _theme_driver_text(themes: List[str], sector: Optional[str], industry: Optional[str]) -> str:
+    theme_text = ' '.join(themes or []).lower()
+    sector_text = str(sector or '').lower()
+    industry_text = str(industry or '').lower()
+
+    if 'cyber' in theme_text or 'security' in theme_text:
+        return 'durable security spending and higher platform attach rates'
+    if 'cloud' in theme_text or 'saas' in theme_text:
+        return 'enterprise software durability plus new AI upsell'
+    if 'semiconductor' in theme_text or 'data center' in theme_text or 'ai' in theme_text:
+        return 'AI infrastructure demand and better operating leverage'
+    if 'defense' in theme_text or 'aerospace' in theme_text:
+        return 'budget resilience, backlog durability, and multi-year demand visibility'
+    if 'biotech' in theme_text or 'pharma' in theme_text:
+        return 'pipeline progress and cleaner commercial execution'
+    if 'ev' in theme_text or 'clean energy' in theme_text:
+        return 'new product-cycle upside and longer-dated optionality'
+    if 'crypto' in theme_text:
+        return 'crypto-linked operating leverage and a friendlier risk backdrop'
+    if 'oil' in theme_text or 'gas' in theme_text or 'energy' in theme_text:
+        return 'commodity support and capital discipline'
+    if 'software' in industry_text or sector_text == 'technology':
+        return 'better software monetization and cleaner estimate revisions'
+    if sector_text == 'healthcare':
+        return 'better growth durability and margin quality'
+    if sector_text == 'industrials':
+        return 'order visibility and execution against backlog'
+    return 'a cleaner multi-quarter growth and execution story'
+
+
+def _watchlist_stance(detail: dict) -> str:
+    recommendation = str(detail.get('recommendation') or '').lower()
+    revenue_growth = detail.get('revenue_growth') or 0
+    earnings_growth = detail.get('earnings_growth') or 0
+    forward_pe = detail.get('forward_pe')
+
+    if recommendation in ('sell', 'strong_sell', 'underperform'):
+        return 'Cautious'
+    if recommendation in ('buy', 'strong_buy') and (revenue_growth >= 12 or earnings_growth >= 15):
+        return 'Bullish'
+    if forward_pe is not None and forward_pe >= 45 and revenue_growth < 15:
+        return 'Cautious'
+    return 'Neutral'
+
+
+def _watchlist_market_pricing_for(detail: dict, headlines: List[dict], themes: List[str]) -> str:
+    company_name = detail.get('company_name') or detail.get('ticker') or 'This stock'
+    driver_text = _theme_driver_text(themes, detail.get('sector'), detail.get('industry'))
+    spread = _target_spread(detail)
+    headline_blob = _headline_text_blob(headlines)
+
+    if _contains_any(headline_blob, ['guidance', 'raise', 'beat', 'strong demand', 'record']):
+        tail = 'Fresh verified headline flow is reinforcing that upside case instead of cooling it off.'
+    elif _contains_any(headline_blob, ['miss', 'cut', 'slowdown', 'probe', 'investigation', 'delay']):
+        tail = 'Recent headline flow has introduced enough friction that the market is demanding proof, not just the story.'
+    elif spread is not None and spread >= 12:
+        tail = f'Consensus target still sits about {spread:.1f}% above spot, so the Street is still underwriting that optionality.'
+    else:
+        tail = 'That means the tape is reacting more to the next few quarters than to the last quarter alone.'
+
+    return f'The market is increasingly valuing {company_name} for {driver_text} rather than just a steady-state business. {tail}'
+
+
+def _watchlist_core_thesis(detail: dict, headlines: List[dict], quote_view: dict) -> str:
+    company_name = detail.get('company_name') or detail.get('ticker') or 'The company'
+    growth_bits = []
+    if detail.get('revenue_growth') is not None:
+        growth_bits.append(f"revenue growth around {detail['revenue_growth']:.1f}%")
+    if detail.get('earnings_growth') is not None:
+        growth_bits.append(f"earnings growth around {detail['earnings_growth']:.1f}%")
+    if detail.get('operating_margin') is not None:
+        growth_bits.append(f"{detail['operating_margin']:.1f}% operating margin")
+
+    live_bits = []
+    if quote_view.get('display_price') is not None:
+        live_bits.append(f"shares are trading near {quote_view['display_price']:.2f}")
+    if quote_view.get('display_change_pct') is not None:
+        live_bits.append(f"with a {quote_view['display_change_pct']:+.2f}% {quote_view['display_session'].lower()} move")
+
+    lead_headline = headlines[0] if headlines else None
+    headline_line = ''
+    if lead_headline:
+        headline_line = f' The latest verified headline is "{lead_headline.get("title")}", which keeps the narrative anchored to a real company-specific catalyst.'
+
+    growth_text = ', '.join(growth_bits) if growth_bits else 'limited published growth data'
+    live_text = ' '.join(live_bits) if live_bits else 'the live tape needs a refresh'
+    return f'{company_name} currently screens like {_perception_before(detail)}. Published fundamentals show {growth_text}, and {live_text}.{headline_line}'
+
+
+def _watchlist_pillars(detail: dict, headlines: List[dict], quote_view: dict, themes: List[str]) -> List[dict]:
+    driver_text = _theme_driver_text(themes, detail.get('sector'), detail.get('industry'))
+    short_interest = detail.get('short_interest')
+    rvol = detail.get('rvol')
+    spread = _target_spread(detail)
+
+    tape_line = []
+    if quote_view.get('display_change_pct') is not None:
+        tape_line.append(f"the latest move is {quote_view['display_change_pct']:+.2f}%")
+    if rvol is not None:
+        tape_line.append(f"relative volume is {rvol:.2f}x")
+    if short_interest is not None:
+        tape_line.append(f"short interest is {short_interest:.1f}%")
+
+    valuation_body = _valuation_frame(detail)
+    if spread is not None and spread >= 10:
+        valuation_body = f'Consensus target still sits about {spread:.1f}% above spot. {valuation_body}'
+
+    return [
+        {
+            'title': 'Core Thesis',
+            'body': f'The bull case rests on {driver_text}. The key is whether investors keep paying for the next leg of the story instead of fading back to a plain-vanilla sector multiple.',
+        },
+        {
+            'title': 'Fundamental Reality',
+            'body': _fundamental_snapshot(detail),
+        },
+        {
+            'title': 'Tape Check',
+            'body': ('Right now ' + ', '.join(tape_line) + '.')
+            if tape_line else
+            'Price, volume, and positioning are not offering a clean tape read yet, so follow-through matters more than the opening impression.',
+        },
+        {
+            'title': 'Valuation Frame',
+            'body': valuation_body,
+        },
+    ]
+
+
+def _watchlist_catalysts(headlines: List[dict]) -> List[dict]:
+    catalysts = []
+    for headline in headlines[:3]:
+        summary = (headline.get('summary') or '').strip()
+        note = summary[:220] if summary else 'Fresh matched headline returned without a long publisher summary.'
+        catalysts.append({
+            'title': headline.get('title') or 'Headline',
+            'source': headline.get('source') or 'News feed',
+            'published_at': headline.get('published_at'),
+            'note': note,
+            'url': headline.get('url'),
+            'verified': bool(headline.get('verified')),
+        })
+    return catalysts
+
+
+def _watchlist_risks(detail: dict, headlines: List[dict]) -> List[str]:
+    risks = [_risk_invalidation_read('Strategic / Demand', detail)]
+    headline_blob = _headline_text_blob(headlines)
+    if _contains_any(headline_blob, ['cut', 'miss', 'slowdown', 'delay', 'probe', 'investigation']):
+        risks.append('Recent headline flow has at least one visible risk flag in it, so the market may stay skeptical until the next clean company update resolves that doubt.')
+    if detail.get('forward_pe') is not None and detail['forward_pe'] >= 35:
+        risks.append(f'At roughly {detail["forward_pe"]:.1f}x forward earnings, the multiple already assumes quality, so execution misses can compress the stock quickly.')
+    elif detail.get('operating_margin') is not None and detail['operating_margin'] <= 10:
+        risks.append('Margins are still low enough that investors may treat this as an execution story until profitability improves materially.')
+    else:
+        risks.append('If the next catalyst does not improve estimates, the stock can drift back into a range even if the long-term narrative still sounds attractive.')
+    return risks[:3]
+
+
+def _watchlist_decision_frame(detail: dict, quote_view: dict) -> str:
+    company_name = detail.get('company_name') or detail.get('ticker') or 'The stock'
+    if quote_view.get('display_change_pct') is not None and quote_view['display_change_pct'] >= 4:
+        return f'{company_name} is already getting a meaningful live tape response, so the next question is whether that move can hold once the first headline reaction fades.'
+    if quote_view.get('display_change_pct') is not None and quote_view['display_change_pct'] <= -4:
+        return f'{company_name} is under pressure in the live tape, so the real test is whether bad news is now priced in or whether the story is still deteriorating.'
+    return f'{company_name} still needs a cleaner trigger. Treat this as a prepared thesis card: know the narrative, watch the next catalyst, and let price decide whether the story is being accepted or rejected.'
+
+
 def _build_watchlist_item(ticker: str, limit_per_ticker: int) -> dict:
     from news_fetcher import get_stock_news
 
@@ -1097,25 +1325,40 @@ def _build_watchlist_item(ticker: str, limit_per_ticker: int) -> dict:
     company_name = detail.get('company_name') or ticker
     headlines = get_stock_news(ticker, company_name=company_name, limit=max(limit_per_ticker * 2, 6))
     display_headlines, has_verified = _watchlist_headline_view(headlines, limit_per_ticker)
+    quote_view = _live_quote_view(detail)
+    themes = detail.get('themes') or []
+    catalysts = _watchlist_catalysts(display_headlines)
+    pillars = _watchlist_pillars(detail, display_headlines, quote_view, themes)
 
     return {
         'ticker': ticker,
         'company_name': company_name,
-        'price': detail.get('premarket_price') or detail.get('postmarket_price') or detail.get('price'),
-        'change_pct': detail.get('premarket_pct') if detail.get('premarket_pct') is not None else (
-            detail.get('postmarket_pct') if detail.get('postmarket_pct') is not None else detail.get('change_pct')
-        ),
+        'price': quote_view.get('display_price'),
+        'change_pct': quote_view.get('display_change_pct'),
         'regular_change_pct': detail.get('change_pct'),
+        'regular_price': detail.get('price'),
+        'display_session': quote_view.get('display_session'),
+        'display_session_label': quote_view.get('display_session_label'),
         'sector': detail.get('sector'),
         'industry': detail.get('industry'),
         'market_cap': detail.get('market_cap'),
         'short_interest': detail.get('short_interest'),
         'rvol': detail.get('rvol'),
+        'stance': _watchlist_stance(detail),
+        'themes': themes,
         'headline_mode': 'verified' if has_verified else 'recent',
         'has_verified_headline': has_verified,
         'headline_count': len(display_headlines),
         'latest_headline_at': display_headlines[0].get('published_at') if display_headlines else None,
         'x_search_url': _build_x_search_url(ticker, company_name),
+        'what_market_is_pricing_for': _watchlist_market_pricing_for(detail, display_headlines, themes),
+        'core_thesis': _watchlist_core_thesis(detail, display_headlines, quote_view),
+        'pillars': pillars,
+        'decision_frame': _watchlist_decision_frame(detail, quote_view),
+        'catalysts': catalysts,
+        'risks': _watchlist_risks(detail, display_headlines),
+        'analyst_view': _analyst_expectation(detail),
+        'fundamental_snapshot': _fundamental_snapshot(detail),
         'headlines': [
             {
                 'title': item.get('title'),
@@ -1193,13 +1436,15 @@ def get_watchlist_news(tickers: List[str], limit_per_ticker: int = 3) -> dict:
 
     return {
         'updated_at': datetime.now(timezone.utc).isoformat(),
-        'summary': {
-            'total_tickers': len(items),
-            'with_news_count': sum(1 for item in items if item and item.get('headline_count')),
-            'with_verified_news_count': sum(1 for item in items if item and item.get('has_verified_headline')),
-            'latest_headline_at': latest_headline_at,
-            'total_headlines': sum((item.get('headline_count') or 0) for item in items if item),
-        },
+            'summary': {
+                'total_tickers': len(items),
+                'with_news_count': sum(1 for item in items if item and item.get('headline_count')),
+                'with_verified_news_count': sum(1 for item in items if item and item.get('has_verified_headline')),
+                'latest_headline_at': latest_headline_at,
+                'total_headlines': sum((item.get('headline_count') or 0) for item in items if item),
+                'bullish_count': sum(1 for item in items if item and item.get('stance') == 'Bullish'),
+                'cautious_count': sum(1 for item in items if item and item.get('stance') == 'Cautious'),
+            },
         'items': items,
     }
 
@@ -1690,79 +1935,237 @@ def _fetch_single_earnings_event(ticker: str, start_dt: datetime, end_dt: dateti
 
     return _pick_earnings_candidate(candidates, now_dt)
 
+def _earnings_lead_headline(headlines: List[dict]) -> Optional[dict]:
+    terms = ['earnings', 'guidance', 'results', 'quarter', 'eps', 'revenue', 'outlook', 'profit']
+    for headline in headlines:
+        text = f"{headline.get('title') or ''} {headline.get('summary') or ''}"
+        if _contains_any(text, terms):
+            return headline
+    return headlines[0] if headlines else None
 
-def _build_earnings_reasoning(event: dict, quote_data: dict, themes: List[str], now_dt: datetime) -> str:
-    earnings_dt = event.get('earnings_date')
-    surprise_pct = _safe_float(event.get('surprise_pct'))
-    eps_estimate = _safe_float(event.get('eps_estimate'))
-    reported_eps = _safe_float(event.get('reported_eps'))
-    change_pct = _safe_float(quote_data.get('change_pct'))
-    price = _safe_float(quote_data.get('price'))
-    source_label = event.get('event_source_label') or 'Yahoo earnings feed'
-    report_time = event.get('report_time')
-    theme_text = ', '.join(themes[:2]) if themes else 'the broader tape'
-    market_now = now_dt.astimezone(EASTERN_TZ)
-    days_until = None
-    if earnings_dt:
-        days_until = (earnings_dt.astimezone(EASTERN_TZ).date() - market_now.date()).days
 
-    parts = []
-    if days_until is not None and days_until < 0:
-        if surprise_pct is not None and surprise_pct > 0:
-            if change_pct is not None and change_pct < 0:
-                parts.append(f'The last print beat EPS by {surprise_pct:.2f}%, but price is still red, which usually means guidance, quality of beat, or crowded expectations are the real issue.')
-            else:
-                parts.append(f'The last print beat EPS by {surprise_pct:.2f}%, and the tape is still treating that report as a positive reset instead of a one-day pop.')
-        elif surprise_pct is not None and surprise_pct < 0:
-            if change_pct is not None and change_pct > 0:
-                parts.append(f'The last print missed EPS by {abs(surprise_pct):.2f}%, but the stock is holding up anyway, which suggests expectations had already reset or forward commentary mattered more than the miss.')
-            else:
-                parts.append(f'The last print missed EPS by {abs(surprise_pct):.2f}%, so traders are still watching for whether sellers keep control of the post-earnings tape.')
-        elif reported_eps is not None:
-            parts.append(f'The report is already out with reported EPS at {reported_eps:.2f}, so price reaction matters more now than the raw calendar event.')
-        else:
-            parts.append('The earnings event recently hit the tape, so the key read is whether the market is accepting the result or still repricing the story.')
+def _criteria_item(label: str, passed, note: str) -> dict:
+    return {
+        'label': label,
+        'passed': passed,
+        'note': note,
+    }
+
+
+def _earnings_verdict(event: dict, quote_view: dict, headlines: List[dict]) -> str:
+    surprise_pct = event.get('surprise_pct')
+    reaction_pct = quote_view.get('display_change_pct')
+    headline_blob = _headline_text_blob(headlines)
+
+    if surprise_pct is not None and reaction_pct is not None:
+        if surprise_pct >= 5 and reaction_pct >= 3:
+            return 'better'
+        if surprise_pct < 0 and reaction_pct <= -2:
+            return 'worse'
+        if surprise_pct >= 0 and reaction_pct <= -2:
+            return 'mixed'
+        if surprise_pct < 0 and reaction_pct >= 2:
+            return 'mixed'
+
+    if reaction_pct is not None:
+        if reaction_pct >= 5:
+            return 'better'
+        if reaction_pct <= -5:
+            return 'worse'
+
+    if _contains_any(headline_blob, ['raise', 'record', 'strong demand', 'accelerat', 'backlog']):
+        return 'better'
+    if _contains_any(headline_blob, ['miss', 'cut', 'slowdown', 'pressure', 'declin', 'cannibal']):
+        return 'worse'
+    return 'mixed'
+
+
+def _earnings_narrative_shift(event: dict, detail: dict, quote_view: dict, headlines: List[dict]) -> str:
+    verdict = _earnings_verdict(event, quote_view, headlines)
+    surprise_pct = event.get('surprise_pct')
+    reaction_pct = quote_view.get('display_change_pct')
+
+    if verdict == 'better':
+        if surprise_pct is not None and reaction_pct is not None:
+            return f'The quarter looks better than the prior setup: EPS surprise landed at {surprise_pct:+.2f}% and shares are reacting {reaction_pct:+.2f}% in {quote_view.get("display_session")}.'
+        return 'The post-print read looks constructive: the market is leaning toward a real estimate reset instead of a one-day headline pop.'
+    if verdict == 'worse':
+        if surprise_pct is not None and reaction_pct is not None:
+            return f'The report is being treated as worse than hoped: EPS surprise is {surprise_pct:+.2f}% and the live reaction is {reaction_pct:+.2f}% in {quote_view.get("display_session")}.'
+        return 'The post-print read looks weaker: the market is de-risking rather than paying up for the next leg of the story.'
+    return 'The quarter looks mixed: the headline numbers and the tape reaction are not pointing cleanly in the same direction yet.'
+
+
+def _earnings_before_view(event: dict, detail: dict, themes: List[str]) -> str:
+    company_name = detail.get('company_name') or detail.get('ticker') or 'The company'
+    eps_estimate = event.get('eps_estimate')
+    expectation = _analyst_expectation(detail)
+    driver_text = _theme_driver_text(themes, detail.get('sector'), detail.get('industry'))
+
+    estimate_line = f'Street EPS estimate sat near {eps_estimate:.2f}. ' if eps_estimate is not None else ''
+    return (
+        f'Before earnings, the market viewed {company_name} as {_perception_before(detail)}. '
+        f'{estimate_line}The bull case going into the print rested on {driver_text}. '
+        f'{expectation}'
+    )
+
+
+def _earnings_after_view(event: dict, detail: dict, quote_view: dict, headlines: List[dict]) -> str:
+    verdict = _earnings_verdict(event, quote_view, headlines)
+    lead_headline = _earnings_lead_headline(headlines)
+    reaction_pct = quote_view.get('display_change_pct')
+    surprise_pct = event.get('surprise_pct')
+
+    surprise_line = ''
+    if surprise_pct is not None:
+        surprise_line = f'EPS surprise printed at {surprise_pct:+.2f}%. '
+    reaction_line = ''
+    if reaction_pct is not None:
+        reaction_line = f'The live reaction is {reaction_pct:+.2f}% in {quote_view.get("display_session")}. '
+    headline_line = ''
+    if lead_headline:
+        headline_line = (lead_headline.get('summary') or lead_headline.get('title') or '').strip()
+        if headline_line:
+            headline_line = f'Lead read: {headline_line[:240]}'
+
+    if verdict == 'better':
+        prefix = 'After earnings, the setup looks better than it did before the print.'
+    elif verdict == 'worse':
+        prefix = 'After earnings, the setup looks worse than the pre-report narrative.'
     else:
-        if days_until == 0:
-            timing_text = 'today'
-            if report_time == 'BMO':
-                timing_text = 'today before the open'
-            elif report_time == 'AMC':
-                timing_text = 'today after the close'
-            elif report_time == 'TNS':
-                timing_text = 'today with timing still not specific'
-            if eps_estimate is not None:
-                parts.append(f'The report is due {timing_text} with Street EPS estimate around {eps_estimate:.2f}, so traders will judge whether the setup was already leaning too bullish or too bearish into the print.')
-            else:
-                parts.append(f'The report is due {timing_text}, so the setup is about whether the stock is coiled for expansion or already priced for too much.')
-        elif eps_estimate is not None:
-            parts.append(f'The next report is on deck with Street EPS estimate at {eps_estimate:.2f}, so the real question is whether price is leaning into the print too early.')
-        else:
-            parts.append('An earnings date is coming up, so the setup question is whether the stock is coiling for expansion or already extended into the event.')
+        prefix = 'After earnings, the setup still needs interpretation because the reaction is mixed.'
 
-    if change_pct is not None and price is not None:
-        if days_until is not None and days_until >= 0:
-            if abs(change_pct) >= 6:
-                lean = 'bullishly' if change_pct > 0 else 'defensively'
-                parts.append(f'Price is already leaning {lean} into the event, with shares {("up" if change_pct >= 0 else "down")} {abs(change_pct):.2f}% at about {price:.2f}.')
-            elif abs(change_pct) <= 1.5:
-                parts.append(f'The tape is still fairly balanced near {price:.2f}, so expectations do not look extremely one-sided yet.')
-            else:
-                parts.append(f'Shares are {("up" if change_pct >= 0 else "down")} {abs(change_pct):.2f}% at about {price:.2f}, which shows traders are already taking a directional view into the event.')
-        else:
-            if surprise_pct is not None and surprise_pct > 0 and change_pct < 0:
-                parts.append(f'Shares are down {abs(change_pct):.2f}% at about {price:.2f}, so the market is telling you the headline beat was not enough on its own.')
-            elif surprise_pct is not None and surprise_pct < 0 and change_pct > 0:
-                parts.append(f'Shares are still up {change_pct:.2f}% at about {price:.2f}, so the bad print may have already been discounted before the report landed.')
-            else:
-                parts.append(f'Shares are {("up" if change_pct >= 0 else "down")} {abs(change_pct):.2f}% at about {price:.2f}, which is the cleanest read on whether the market is rewarding or rejecting the print.')
+    return ' '.join(part for part in (prefix, surprise_line, reaction_line, headline_line) if part).strip()
 
-    parts.append(f'This name also matters for {theme_text}, so a clean earnings reaction can spill over into related peers and theme baskets.')
-    parts.append(f'Calendar source: {source_label}.')
-    return ' '.join(parts)
+
+def _earnings_what_they_said(event: dict, quote_view: dict, lead_headline: Optional[dict]) -> str:
+    pieces = []
+    if event.get('reported_eps') is not None and event.get('eps_estimate') is not None:
+        pieces.append(f"Reported EPS {event['reported_eps']:.2f} versus {event['eps_estimate']:.2f} expected.")
+    elif event.get('reported_eps') is not None:
+        pieces.append(f"Reported EPS {event['reported_eps']:.2f}.")
+    if event.get('surprise_pct') is not None:
+        pieces.append(f"Surprise {event['surprise_pct']:+.2f}%.")
+    if quote_view.get('display_price') is not None and quote_view.get('display_change_pct') is not None:
+        pieces.append(
+            f"Shares are trading near {quote_view['display_price']:.2f} with a {quote_view['display_change_pct']:+.2f}% {quote_view.get('display_session')} reaction."
+        )
+    if lead_headline:
+        summary = (lead_headline.get('summary') or '').strip()
+        if summary:
+            pieces.append(summary[:240])
+        elif lead_headline.get('title'):
+            pieces.append(lead_headline['title'])
+    return ' '.join(pieces) or 'The report is on deck, but a detailed company statement has not been parsed yet.'
+
+
+def _earnings_ai_reasoning(event: dict, detail: dict, quote_view: dict, themes: List[str], headlines: List[dict]) -> str:
+    company_name = detail.get('company_name') or detail.get('ticker') or 'The company'
+    verdict = _earnings_verdict(event, quote_view, headlines)
+    driver_text = _theme_driver_text(themes, detail.get('sector'), detail.get('industry'))
+    valuation = _valuation_frame(detail)
+    expectation = _analyst_expectation(detail)
+    lead_headline = _earnings_lead_headline(headlines)
+    headline_text = ''
+    if lead_headline:
+        headline_text = (lead_headline.get('summary') or lead_headline.get('title') or '').strip()
+        headline_text = headline_text[:220]
+
+    if verdict == 'better':
+        opener = f'{company_name} looks like a better setup after the print because the market is starting to pay for {driver_text} instead of waiting for more proof.'
+    elif verdict == 'worse':
+        opener = f'{company_name} looks worse after the print because the market is treating the report as a threat to the prior rerating case around {driver_text}.'
+    else:
+        opener = f'{company_name} still looks mixed after the print: the quarter moved the story, but not enough to settle whether {driver_text} is truly improving or merely getting deferred.'
+
+    middle = headline_text or _earnings_narrative_shift(event, detail, quote_view, headlines)
+    return f'{opener} {middle} {valuation} {expectation}'
+
+
+def _earnings_quallamaggie_criteria(event: dict, detail: dict, quote_view: dict, headlines: List[dict]) -> dict:
+    reaction_pct = quote_view.get('display_change_pct')
+    price = quote_view.get('display_price') or detail.get('price')
+    surprise_pct = event.get('surprise_pct')
+    rvol = detail.get('rvol')
+    growth_ok = (detail.get('revenue_growth') or 0) >= 15 or (detail.get('earnings_growth') or 0) >= 25
+
+    items = [
+        _criteria_item('Gap / reaction > 10%', reaction_pct >= 10 if reaction_pct is not None else None, 'Needs a decisive post-print expansion, not just a modest drift.'),
+        _criteria_item('Price above $5', price > 5 if price is not None else None, 'Avoids the lowest-quality penny-stock setups.'),
+        _criteria_item('Strong catalyst', True if event.get('reported_eps') is not None or event.get('eps_estimate') is not None else None, 'An actual earnings event is present in the tracker.'),
+        _criteria_item('Growth acceleration', growth_ok if detail.get('revenue_growth') is not None or detail.get('earnings_growth') is not None else None, 'Uses the published growth profile as a proxy for fundamental strength.'),
+        _criteria_item('Meaningful analyst beat', surprise_pct >= 5 if surprise_pct is not None else None, 'Looks for a real EPS beat, not just an inline print.'),
+        _criteria_item('Volume expansion > 2x', rvol >= 2 if rvol is not None else None, 'Uses current relative volume as the tape confirmation proxy.'),
+        _criteria_item('Fresh headline support', bool(headlines), 'At least one matched company-specific headline is available to explain the move.'),
+    ]
+    passed_count = sum(1 for item in items if item['passed'] is True)
+    applicable_count = sum(1 for item in items if item['passed'] is not None)
+    return {
+        'name': 'Quallamaggie EP Criteria',
+        'passed_count': passed_count,
+        'applicable_count': applicable_count,
+        'items': items,
+    }
+
+
+def _earnings_stockbee_criteria(event: dict, detail: dict, quote_view: dict) -> dict:
+    reaction_pct = quote_view.get('display_change_pct')
+    price = quote_view.get('display_price') or detail.get('price')
+    surprise_pct = event.get('surprise_pct')
+    analyst_count = detail.get('analyst_count')
+    rvol = detail.get('rvol')
+
+    items = [
+        _criteria_item('EPS surprise positive', surprise_pct >= 0 if surprise_pct is not None else None, 'Positive surprise is the simplest first filter.'),
+        _criteria_item('Revenue growth > 5%', (detail.get('revenue_growth') or 0) >= 5 if detail.get('revenue_growth') is not None else None, 'Uses published growth data as the sales acceleration check.'),
+        _criteria_item('Earnings growth > 25%', (detail.get('earnings_growth') or 0) >= 25 if detail.get('earnings_growth') is not None else None, 'Looks for meaningful operating leverage, not a token beat.'),
+        _criteria_item('Volume > 3x average', rvol >= 3 if rvol is not None else None, 'Uses current relative volume as the liquidity confirmation.'),
+        _criteria_item('Price reaction > 4%', reaction_pct >= 4 if reaction_pct is not None else None, 'Post-print reaction should be large enough to matter.'),
+        _criteria_item('Neglected / lighter coverage', analyst_count <= 20 if analyst_count is not None else None, 'Uses analyst count as a rough proxy for crowding.'),
+        _criteria_item('Price above $5', price > 5 if price is not None else None, 'Keeps the scanner in liquid names.'),
+    ]
+    passed_count = sum(1 for item in items if item['passed'] is True)
+    applicable_count = sum(1 for item in items if item['passed'] is not None)
+    return {
+        'name': 'Stockbee EP Criteria',
+        'passed_count': passed_count,
+        'applicable_count': applicable_count,
+        'items': items,
+    }
+
+
+def _build_earnings_reasoning(event: dict, detail: dict, quote_view: dict, themes: List[str], headlines: List[dict]) -> dict:
+    lead_headline = _earnings_lead_headline(headlines)
+    verdict = _earnings_verdict(event, quote_view, headlines)
+    reaction_pct = quote_view.get('display_change_pct')
+    analysis_seed = {
+        'ticker': detail.get('ticker'),
+        'session_pct': reaction_pct or 0,
+        'session_rvol': detail.get('rvol'),
+        'short_interest': detail.get('short_interest'),
+        'float_shares': detail.get('float_shares'),
+    }
+    criteria_sets = [
+        _earnings_quallamaggie_criteria(event, detail, quote_view, headlines),
+        _earnings_stockbee_criteria(event, detail, quote_view),
+    ]
+
+    return {
+        'narrative_shift': _earnings_narrative_shift(event, detail, quote_view, headlines),
+        'before_earnings': _earnings_before_view(event, detail, themes),
+        'after_earnings': _earnings_after_view(event, detail, quote_view, headlines),
+        'what_they_said': _earnings_what_they_said(event, quote_view, lead_headline),
+        'ai_reasoning': _earnings_ai_reasoning(event, detail, quote_view, themes, headlines),
+        'verdict': verdict,
+        'criteria_sets': criteria_sets,
+        'analysis_blocks': _build_session_analysis_blocks(analysis_seed, detail, lead_headline, 'Earnings'),
+        'lead_headline': lead_headline,
+    }
 
 
 def get_earnings_tracker(days_ahead: int = 21, limit: int = 120, lookback_days: int = 7) -> dict:
+    from news_fetcher import get_stock_news
+
     now_utc = datetime.now(timezone.utc)
     market_now = now_utc.astimezone(EASTERN_TZ)
     start_dt = now_utc - timedelta(days=max(lookback_days, 1))
@@ -1792,22 +2195,77 @@ def get_earnings_tracker(days_ahead: int = 21, limit: int = 120, lookback_days: 
         item['ticker'],
     ))
     visible_events = all_events[:limit]
-    quotes = _batch_fetch_chart_quotes([item['ticker'] for item in visible_events])
+    quotes = _batch_fetch_quotes([item['ticker'] for item in visible_events])
+    details_map = {}
+    if visible_events:
+        with ThreadPoolExecutor(max_workers=min(len(visible_events), 6)) as executor:
+            futures = {
+                executor.submit(get_stock_detail, event['ticker']): event['ticker']
+                for event in visible_events
+            }
+            for future in as_completed(futures):
+                ticker = futures[future]
+                try:
+                    details_map[ticker] = future.result()
+                except Exception as exc:
+                    LOGGER.warning('Detail lookup failed for %s: %s', ticker, exc)
+                    details_map[ticker] = {'ticker': ticker, 'company_name': ticker, 'themes': THEME_LOOKUP.get(ticker, [])}
+
+    headlines_map = {}
+    if visible_events:
+        with ThreadPoolExecutor(max_workers=min(len(visible_events), 6)) as executor:
+            futures = {}
+            for event in visible_events:
+                ticker = event['ticker']
+                detail = details_map.get(ticker) or {}
+                company_name = detail.get('company_name') or ticker
+                futures[executor.submit(get_stock_news, ticker, company_name=company_name, limit=6)] = ticker
+            for future in as_completed(futures):
+                ticker = futures[future]
+                try:
+                    headlines_map[ticker] = future.result()
+                except Exception as exc:
+                    LOGGER.warning('Headline lookup failed for %s: %s', ticker, exc)
+                    headlines_map[ticker] = []
 
     items = []
     for event in visible_events:
         ticker = event['ticker']
         quote_data = quotes.get(ticker, {})
+        detail = dict(details_map.get(ticker) or {'ticker': ticker, 'company_name': ticker})
+        detail.update({
+            'ticker': ticker,
+            'company_name': detail.get('company_name') or quote_data.get('long_name') or ticker,
+            'price': quote_data.get('price') if quote_data.get('price') is not None else detail.get('price'),
+            'change_pct': quote_data.get('change_pct') if quote_data.get('change_pct') is not None else detail.get('change_pct'),
+            'pre_market_price': quote_data.get('pre_market_price'),
+            'pre_market_change_pct': quote_data.get('pre_market_change_pct'),
+            'post_market_price': quote_data.get('post_market_price'),
+            'post_market_change_pct': quote_data.get('post_market_change_pct'),
+            'market_cap': quote_data.get('market_cap') if quote_data.get('market_cap') is not None else detail.get('market_cap'),
+            'volume': quote_data.get('volume') if quote_data.get('volume') is not None else detail.get('volume'),
+            'avg_volume': quote_data.get('average_volume') if quote_data.get('average_volume') is not None else detail.get('avg_volume'),
+        })
+        if detail.get('volume') is not None and detail.get('avg_volume'):
+            detail['rvol'] = round((detail.get('volume') or 0) / detail.get('avg_volume'), 2) if detail.get('avg_volume') else detail.get('rvol')
+        quote_view = _live_quote_view(detail)
         earnings_dt = event['earnings_date']
         days_until = (earnings_dt.astimezone(EASTERN_TZ).date() - market_now.date()).days
-        themes = THEME_LOOKUP.get(ticker, [])
+        themes = detail.get('themes') or THEME_LOOKUP.get(ticker, [])
         status = 'Today' if days_until == 0 else ('Upcoming' if days_until > 0 else 'Recent')
         display = earnings_dt.astimezone(EASTERN_TZ).strftime('%a, %b %d %Y %I:%M %p ET')
         if event.get('report_time') in ('BMO', 'AMC', 'TNS'):
             display = f"{display} ({event['report_time']})"
+        matched_headlines = headlines_map.get(ticker) or []
+        verified_headlines = [headline for headline in matched_headlines if headline.get('verified')]
+        lead_headlines = verified_headlines or matched_headlines
+        reasoning = _build_earnings_reasoning(event, detail, quote_view, themes, lead_headlines)
+        reaction_pct = quote_view.get('display_change_pct')
+        criteria_passed = sum(group.get('passed_count', 0) for group in reasoning.get('criteria_sets', []))
+        criteria_total = sum(group.get('applicable_count', 0) for group in reasoning.get('criteria_sets', []))
         items.append({
             'ticker': ticker,
-            'company_name': quote_data.get('long_name') or ticker,
+            'company_name': detail.get('company_name') or quote_data.get('long_name') or ticker,
             'earnings_date': earnings_dt.isoformat(),
             'earnings_date_display': display,
             'report_time': event.get('report_time'),
@@ -1816,17 +2274,35 @@ def get_earnings_tracker(days_ahead: int = 21, limit: int = 120, lookback_days: 
             'eps_estimate': event.get('eps_estimate'),
             'reported_eps': event.get('reported_eps'),
             'surprise_pct': event.get('surprise_pct'),
-            'price': quote_data.get('price'),
-            'change_pct': quote_data.get('change_pct'),
-            'volume': quote_data.get('volume'),
-            'avg_volume': quote_data.get('average_volume'),
-            'rvol': round((quote_data.get('volume') or 0) / (quote_data.get('average_volume') or 1), 2) if quote_data.get('average_volume') else None,
-            'market_cap': quote_data.get('market_cap'),
+            'price': detail.get('price'),
+            'change_pct': detail.get('change_pct'),
+            'display_price': quote_view.get('display_price'),
+            'display_change_pct': reaction_pct,
+            'display_session': quote_view.get('display_session'),
+            'display_session_label': quote_view.get('display_session_label'),
+            'volume': detail.get('volume'),
+            'avg_volume': detail.get('avg_volume'),
+            'rvol': detail.get('rvol'),
+            'market_cap': detail.get('market_cap'),
             'themes': themes,
-            'quote_status': 'available' if quote_data else 'unavailable',
+            'quote_status': 'available' if quote_data or detail.get('price') is not None else 'unavailable',
             'event_source': event.get('event_source'),
             'event_source_label': event.get('event_source_label'),
-            'reasoning': _build_earnings_reasoning(event, quote_data, themes, now_utc),
+            'reaction_pct': reaction_pct,
+            'reaction_label': quote_view.get('display_session'),
+            'stance': reasoning.get('verdict'),
+            'narrative_shift': reasoning.get('narrative_shift'),
+            'before_earnings': reasoning.get('before_earnings'),
+            'after_earnings': reasoning.get('after_earnings'),
+            'what_they_said': reasoning.get('what_they_said'),
+            'ai_reasoning': reasoning.get('ai_reasoning'),
+            'reasoning': reasoning.get('ai_reasoning'),
+            'analysis_blocks': reasoning.get('analysis_blocks') or [],
+            'criteria_sets': reasoning.get('criteria_sets') or [],
+            'criteria_score': f'{criteria_passed}/{criteria_total}' if criteria_total else 'n/a',
+            'lead_headline': reasoning.get('lead_headline'),
+            'headlines': lead_headlines[:3],
+            'analyst_view': _analyst_expectation(detail),
         })
 
     theme_counts = {}
@@ -1845,6 +2321,8 @@ def get_earnings_tracker(days_ahead: int = 21, limit: int = 120, lookback_days: 
             'today_count': sum(1 for event in all_events if (event['earnings_date'].astimezone(EASTERN_TZ).date() - market_now.date()).days == 0),
             'next_7_days': sum(1 for event in all_events if 0 <= (event['earnings_date'].astimezone(EASTERN_TZ).date() - market_now.date()).days <= 7),
             'with_live_quotes': sum(1 for item in items if item.get('price') is not None),
+            'reported_count': sum(1 for item in items if item.get('reported_eps') is not None),
+            'with_positive_reaction': sum(1 for item in items if (item.get('reaction_pct') or 0) > 0),
             'top_theme': top_theme,
         },
         'items': items,

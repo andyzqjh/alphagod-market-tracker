@@ -1,6 +1,7 @@
 import json
 import os
-from typing import List
+from datetime import datetime, timezone
+from typing import List, Optional
 
 from anthropic import Anthropic
 from dotenv import load_dotenv
@@ -602,3 +603,239 @@ Rules:
     merged = _merge_with_fallback(fallback, result)
     merged.pop('error', None)
     return merged
+
+
+def _market_context_read(market_context: dict) -> str:
+    overview = market_context.get('overview_summary', {})
+    positive = overview.get('positive', 0)
+    negative = overview.get('negative', 0)
+    best_theme = market_context.get('best_theme') or 'no clear leading theme'
+    best_group = market_context.get('best_group') or 'no dominant ETF group'
+    headline_rollup = '; '.join(item.get('title', '') for item in market_context.get('market_headlines', [])[:3]) or 'No major market headlines were supplied.'
+    tone = 'mixed'
+    if positive > negative:
+        tone = 'constructive'
+    elif negative > positive:
+        tone = 'defensive'
+    return f"The broader tape is currently {tone}, with {positive} advancing market proxies versus {negative} decliners. Leadership is leaning toward {best_theme}, while ETF rotation is pointing at {best_group}. Market headlines in the background include: {headline_rollup}"
+
+
+def _transcript_catalyst_lines(transcript: dict) -> List[dict]:
+    lines = []
+    for item in transcript.get('catalysts', [])[:4]:
+        lines.append({
+            'title': item.get('theme') or 'Transcript catalyst',
+            'quote': item.get('quote') or '',
+            'why_it_matters': item.get('why_it_matters') or 'This could matter if the market starts to treat it as a durable change rather than a one-quarter soundbite.',
+        })
+    return lines
+
+
+def _fallback_earnings_deep_dive(payload: dict) -> dict:
+    item = payload.get('earnings') or {}
+    detail = payload.get('detail') or {}
+    headlines = payload.get('headlines') or []
+    transcript = payload.get('transcript') or {}
+    catalyst_lines = _transcript_catalyst_lines(transcript)
+    company_name = detail.get('company_name') or item.get('company_name') or item.get('ticker') or 'The company'
+    reaction = item.get('reaction_pct')
+    reaction_text = f'{reaction:+.2f}%' if reaction is not None else 'n/a'
+    transcript_signal = catalyst_lines[0]['why_it_matters'] if catalyst_lines else ''
+    transcript_quote = catalyst_lines[0]['quote'] if catalyst_lines else ''
+    transcript_summary = transcript.get('management_excerpt') or transcript.get('digest') or ''
+    fundamentals = _fundamental_snapshot(detail)
+    valuation = _valuation_context(detail)
+
+    market_view = (
+        f"{_market_context_read(payload.get('market_context') or {})} Against that backdrop, {company_name} is reacting {reaction_text} "
+        f"in {item.get('reaction_label') or '1D'}, so the market is clearly making a fresh judgment on the quarter. {valuation}"
+    )
+
+    impact_news = (
+        f"Impact news around the print includes {_join_headlines(headlines, limit=3)}. "
+        f"{fundamentals}"
+    )
+
+    market_perception_before = (
+        f"Before earnings, the market largely viewed {company_name} as {_perception_before(detail)} "
+        f"{_expectation_view(detail)}"
+    )
+
+    what_changed_after = (
+        f"After earnings, the story changed because {item.get('narrative_shift') or item.get('after_earnings') or 'the quarter forced investors to reassess the prior thesis.'} "
+        f"{transcript_signal} {item.get('ai_reasoning') or ''} "
+        f"{f'Management sounded most explicit in saying: {transcript_quote}' if transcript_quote else transcript_summary[:260]}"
+    ).strip()
+
+    bull_case = (
+        f"The bullish case is that management commentary and the live reaction are supporting a real reset in how investors think about {company_name}. "
+        f"If the new margin, demand, or product commentary feeds into estimates, the stock can rerate beyond the first move. {transcript_signal or valuation}"
+    )
+
+    bear_case = (
+        f"The bearish case is that the print only looks better on the surface and the market is still paying too much for an uncertain setup. "
+        "If guidance, margin durability, or demand quality fail to hold up, the post-earnings move can unwind fast."
+    )
+
+    thesis_breaker = (
+        "The thesis breaks if the supposed improvement does not show up in the next few quarters, especially if margins, growth, or cash generation slide back toward the old profile."
+    )
+
+    today_view = (
+        f"My current view: {company_name} deserves attention because the quarter moved the conversation, but the decisive tell is whether the first reaction becomes sustained follow-through. "
+        f"Treat transcript comments and price action together, not in isolation. {valuation}"
+    )
+
+    return {
+        'market_view': market_view,
+        'impact_news': impact_news,
+        'market_perception_before': market_perception_before,
+        'what_changed_after': what_changed_after,
+        'transcript_catalysts': catalyst_lines,
+        'bull_case': bull_case,
+        'bear_case': bear_case,
+        'thesis_breaker': thesis_breaker,
+        'today_view': today_view,
+    }
+
+
+def build_earnings_deep_dive(payload: dict) -> dict:
+    fallback = _fallback_earnings_deep_dive(payload)
+
+    prompt = f"""You are a senior hedge-fund analyst writing a sharp post-earnings view for an active trader.
+
+Current UTC time:
+{datetime.now(timezone.utc).isoformat()}
+
+Broader market context:
+{json.dumps(payload.get('market_context', {}), ensure_ascii=False)}
+
+Earnings row:
+{json.dumps(payload.get('earnings', {}), ensure_ascii=False)}
+
+Company detail:
+{json.dumps(payload.get('detail', {}), ensure_ascii=False)}
+
+Relevant company news:
+{json.dumps(payload.get('headlines', [])[:6], ensure_ascii=False)}
+
+Transcript metadata:
+{json.dumps({
+    'status': (payload.get('transcript') or {}).get('status'),
+    'provider': (payload.get('transcript') or {}).get('provider'),
+    'quarter': (payload.get('transcript') or {}).get('quarter'),
+    'management_excerpt': (payload.get('transcript') or {}).get('management_excerpt'),
+    'qa_excerpt': (payload.get('transcript') or {}).get('qa_excerpt'),
+    'catalysts': (payload.get('transcript') or {}).get('catalysts'),
+}, ensure_ascii=False)}
+
+Return ONLY valid JSON with this exact structure:
+{{
+  "market_view": "2-3 sentences on your actual current market view for this setup in today's tape",
+  "impact_news": "2-3 sentences on the relevant impact news around the print and sector",
+  "market_perception_before": "2-3 sentences on how the market saw the stock before earnings",
+  "what_changed_after": "2-4 sentences on what changed after earnings and why that matters",
+  "transcript_catalysts": [
+    {{"title": "short catalyst label", "quote": "short excerpt under 220 chars", "why_it_matters": "1-2 sentences"}},
+    {{"title": "short catalyst label", "quote": "short excerpt under 220 chars", "why_it_matters": "1-2 sentences"}}
+  ],
+  "bull_case": "2-3 sentences on the bull case from here",
+  "bear_case": "2-3 sentences on the bear case from here",
+  "thesis_breaker": "1-2 sentences on what would invalidate or make the thesis moot",
+  "today_view": "2-3 sentences with your actual desk-style conclusion today"
+}}
+
+Rules:
+- Do not recycle generic earnings commentary.
+- Explicitly compare the market perception before earnings to what changed after earnings.
+- If the transcript suggests a structural improvement, say exactly what changed: margins, demand quality, pricing, cash flow, product mix, AI monetization, backlog, etc.
+- Use transcript excerpts only when they actually matter.
+- Speak like a real market participant, not a cheerful assistant.
+- Be willing to say the market may be overreacting, underreacting, or still confused.
+- Return JSON only."""
+
+    result = _call_json(prompt, fallback, max_tokens=1400)
+    merged = _merge_with_fallback(fallback, result)
+    if not isinstance(merged.get('transcript_catalysts'), list) or not merged.get('transcript_catalysts'):
+        merged['transcript_catalysts'] = fallback.get('transcript_catalysts', [])
+    return merged
+
+
+def _fallback_watchlist_thesis(payload: dict) -> dict:
+    detail = payload.get('detail') or {}
+    headlines = payload.get('headlines') or []
+    company_name = detail.get('company_name') or detail.get('ticker') or 'The company'
+    fundamentals = _fundamental_snapshot(detail)
+    valuation = _valuation_context(detail)
+
+    return {
+        'market_view': (
+            f"{_market_context_read(payload.get('market_context') or {})} Against that background, {company_name} matters because its own narrative can either confirm or break the current leadership map. {valuation}"
+        ),
+        'impact_news': (
+            f"Fresh impact news for {company_name} includes {_join_headlines(headlines, limit=3)}. "
+            f"That matters because the stock is only actionable when the company-specific story and the broader tape line up. {fundamentals}"
+        ),
+        'what_market_is_pricing_for': (
+            f"The market is pricing {company_name} for {_rerating_read(detail, headlines, 'Constructive uptrend').lower()} "
+            f"{_expectation_view(detail)} {valuation}"
+        ),
+        'bull_case': (
+            f"The bullish case is that {company_name} proves the better version of the story: cleaner execution, better margins, and a catalyst that pulls estimates higher. "
+            f"If that happens while the broader market still rewards the theme, the stock can stay on offense. {fundamentals}"
+        ),
+        'bear_case': (
+            f"The bearish case is that the market is already paying for a better story than the company can deliver. "
+            f"If the next update disappoints or the sector loses sponsorship, the stock can rerate lower even without a disaster quarter. {valuation}"
+        ),
+        'key_negatives': (
+            "The main negatives are valuation compression, stale catalysts, and the risk that good narrative language never shows up in margins, demand, or cash flow."
+        ),
+        'investment_moot': (
+            "The watchlist thesis becomes moot if the expected catalyst disappears, the business reverts back toward the old lower-quality profile, or the broader market stops paying for the theme."
+        ),
+        'today_view': (
+            f"My current view: keep {company_name} on the list only if you can still explain what the market is paying for and what specific evidence would confirm or kill that thesis. {fundamentals}"
+        ),
+    }
+
+
+def build_watchlist_thesis(payload: dict) -> dict:
+    fallback = _fallback_watchlist_thesis(payload)
+
+    prompt = f"""You are a portfolio manager writing a live watchlist thesis note for one stock.
+
+Current UTC time:
+{datetime.now(timezone.utc).isoformat()}
+
+Broader market context:
+{json.dumps(payload.get('market_context', {}), ensure_ascii=False)}
+
+Company detail:
+{json.dumps(payload.get('detail', {}), ensure_ascii=False)}
+
+Recent company news:
+{json.dumps(payload.get('headlines', [])[:6], ensure_ascii=False)}
+
+Return ONLY valid JSON with this exact structure:
+{{
+  "market_view": "2-3 sentences on your current market view for this stock in today's tape",
+  "impact_news": "2-3 sentences on the impact news that matters for the stock right now",
+  "what_market_is_pricing_for": "2-4 sentences on what the market appears to be paying for",
+  "bull_case": "2-3 sentences on the bullish case",
+  "bear_case": "2-3 sentences on the bearish case or negatives",
+  "key_negatives": "1-2 sentences on the key negatives",
+  "investment_moot": "1-2 sentences on what would make the thesis moot and remove it from a serious watchlist",
+  "today_view": "2-3 sentences with your actual current conclusion"
+}}
+
+Rules:
+- Be specific about what the market is pricing for.
+- Tie the thesis to margins, growth durability, product cycle, AI monetization, backlog, pricing, demand quality, or cash flow when relevant.
+- Explain both the bullish version and the negative version of the story.
+- Tell me what would make the watchlist thesis moot.
+- Write like a real investor memo, not a generic app summary.
+- Return JSON only."""
+
+    result = _call_json(prompt, fallback, max_tokens=1100)
+    return _merge_with_fallback(fallback, result)

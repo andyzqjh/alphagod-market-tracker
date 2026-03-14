@@ -387,7 +387,7 @@ def watchlist_thesis(ticker: str):
 
     detail = get_stock_detail(ticker)
     headlines = get_stock_news(ticker, company_name=detail.get('company_name') or ticker, limit=6)
-    market_context = _market_context_snapshot()
+    market_context = get_cached('market_context_snapshot', ttl=120) or {}
     analysis = build_watchlist_thesis({
         'detail': detail,
         'headlines': headlines,
@@ -415,10 +415,16 @@ def earnings_deep_dive(ticker: str):
 
     tracker = _earnings_tracker_for_deep_dive()
     item = next((row for row in tracker.get('items', []) if row.get('ticker') == ticker), None)
-    detail = get_stock_detail(ticker)
-    headlines = get_stock_news(ticker, company_name=detail.get('company_name') or ticker, limit=6)
+    detail = dict(item or {})
+    if not detail:
+        detail = get_stock_detail(ticker)
+    detail.setdefault('ticker', ticker)
+    detail.setdefault('company_name', detail.get('company_name') or ticker)
+    headlines = list((item or {}).get('headlines') or [])
+    if not headlines:
+        headlines = get_stock_news(ticker, company_name=detail.get('company_name') or ticker, limit=6)
     transcript = get_earnings_call_transcript(ticker, earnings_date=item.get('earnings_date') if item else None)
-    market_context = _market_context_snapshot()
+    market_context = get_cached('market_context_snapshot', ttl=120) or {}
     analysis = build_earnings_deep_dive({
         'earnings': item or {'ticker': ticker, 'company_name': detail.get('company_name') or ticker},
         'detail': detail,

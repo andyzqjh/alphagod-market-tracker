@@ -158,6 +158,30 @@ def _earnings_tracker_for_deep_dive():
     return tracker
 
 
+def _fast_earnings_analysis(item: Optional[dict], detail: dict, headlines: List[dict], transcript: dict) -> dict:
+    item = item or {}
+    company_name = detail.get('company_name') or item.get('company_name') or item.get('ticker') or 'The company'
+    market_view = item.get('analyst_view') or item.get('ai_reasoning') or f'{company_name} still needs a fresh market read.'
+    impact_news = item.get('what_they_said') or (headlines[0].get('summary') if headlines else '') or 'No fresh impact-news summary is available yet.'
+    before = item.get('before_earnings') or f'Before earnings, the market was still deciding whether {company_name} deserved a better multiple.'
+    after = item.get('after_earnings') or item.get('narrative_shift') or f'After earnings, the tape is still processing whether {company_name} actually changed the story.'
+    today_view = item.get('ai_reasoning') or item.get('reasoning') or f'My current view is that {company_name} matters only if the first reaction holds and the next update confirms the change.'
+    bull_case = f'The bull case is that {company_name} just started a cleaner estimate reset and the market keeps paying up for the better version of the story.'
+    bear_case = f'The bear case is that the move is mostly headline reaction and the business has not changed enough to justify a durable rerating.'
+    thesis_breaker = 'The thesis breaks if the supposed improvement in demand, margins, or guidance does not hold over the next few updates.'
+    return {
+        'market_view': market_view,
+        'impact_news': impact_news,
+        'market_perception_before': before,
+        'what_changed_after': after,
+        'transcript_catalysts': transcript.get('catalysts') or [],
+        'bull_case': bull_case,
+        'bear_case': bear_case,
+        'thesis_breaker': thesis_breaker,
+        'today_view': today_view,
+    }
+
+
 @app.get('/')
 def index():
     html_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'dashboard.html')
@@ -425,13 +449,16 @@ def earnings_deep_dive(ticker: str):
         headlines = get_stock_news(ticker, company_name=detail.get('company_name') or ticker, limit=6)
     transcript = get_earnings_call_transcript(ticker, earnings_date=item.get('earnings_date') if item else None)
     market_context = get_cached('market_context_snapshot', ttl=120) or {}
-    analysis = build_earnings_deep_dive({
-        'earnings': item or {'ticker': ticker, 'company_name': detail.get('company_name') or ticker},
-        'detail': detail,
-        'headlines': headlines,
-        'transcript': transcript,
-        'market_context': market_context,
-    })
+    if transcript.get('status') == 'available':
+        analysis = build_earnings_deep_dive({
+            'earnings': item or {'ticker': ticker, 'company_name': detail.get('company_name') or ticker},
+            'detail': detail,
+            'headlines': headlines,
+            'transcript': transcript,
+            'market_context': market_context,
+        })
+    else:
+        analysis = _fast_earnings_analysis(item, detail, headlines, transcript)
     payload = {
         'ticker': ticker,
         'updated_at': datetime.now(timezone.utc).isoformat(),

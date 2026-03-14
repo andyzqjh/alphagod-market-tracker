@@ -2864,6 +2864,24 @@ def _perception_before(detail: dict) -> str:
     return 'an execution-sensitive story where investors still need proof on growth, margins, or durability'
 
 
+def _valuation_frame(detail: dict) -> str:
+    spread = _target_spread(detail)
+    forward_pe = detail.get('forward_pe')
+    price_to_sales = detail.get('price_to_sales')
+
+    if spread is not None and spread >= 12:
+        return f'Consensus target still sits about {spread:.1f}% above spot, so valuation still leaves room if the company proves a cleaner story.'
+    if spread is not None and spread <= -8:
+        return f'The stock is already trading roughly {abs(spread):.1f}% above consensus target, so expectations are rich and the next leg needs stronger proof.'
+    if forward_pe is not None and forward_pe >= 30:
+        return f'At roughly {forward_pe:.1f}x forward earnings, the multiple already prices in a good chunk of quality and durability.'
+    if forward_pe is not None and forward_pe <= 12:
+        return f'At only about {forward_pe:.1f}x forward earnings, the setup still has rerating room if execution improves.'
+    if price_to_sales is not None and price_to_sales >= 8:
+        return f'At about {price_to_sales:.1f}x sales, investors will want cleaner evidence that growth and margins can keep compounding.'
+    return 'Valuation is not extreme either way, so the next move probably depends more on estimate revisions and follow-through than on the starting multiple.'
+
+
 def _analyst_expectation(detail: dict) -> str:
     recommendation = (detail.get('recommendation') or '').lower()
     analyst_count = detail.get('analyst_count')

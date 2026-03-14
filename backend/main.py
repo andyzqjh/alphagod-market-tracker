@@ -1,3 +1,4 @@
+import json
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -62,6 +63,10 @@ def get_cached(key: str, ttl: int = CACHE_TTL):
 def set_cache(key: str, value):
     _cache[key] = value
     _cache_time[key] = time.time()
+
+
+def _safe_payload(value):
+    return json.loads(json.dumps(value, default=str))
 
 
 def _collect_market_headlines() -> List[dict]:
@@ -386,6 +391,7 @@ def watchlist_thesis(ticker: str):
         'headlines': headlines,
         'analysis': analysis,
     }
+    payload = _safe_payload(payload)
     set_cache(key, payload)
     return payload
 
@@ -420,6 +426,7 @@ def earnings_deep_dive(ticker: str):
         'transcript': transcript,
         'analysis': analysis,
     }
+    payload = _safe_payload(payload)
     set_cache(key, payload)
     return payload
 

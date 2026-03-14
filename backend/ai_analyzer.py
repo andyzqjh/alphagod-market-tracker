@@ -9,6 +9,10 @@ from dotenv import load_dotenv
 load_dotenv()
 API_KEY = os.environ.get('ANTHROPIC_API_KEY')
 client = Anthropic(api_key=API_KEY) if API_KEY else None
+
+
+def _json_text(value) -> str:
+    return json.dumps(value, ensure_ascii=False, default=str)
 AI_TIMEOUT_SECONDS = float(os.environ.get('ANTHROPIC_TIMEOUT_SECONDS', '18'))
 
 
@@ -708,26 +712,26 @@ Current UTC time:
 {datetime.now(timezone.utc).isoformat()}
 
 Broader market context:
-{json.dumps(payload.get('market_context', {}), ensure_ascii=False)}
+{_json_text(payload.get('market_context', {}))}
 
 Earnings row:
-{json.dumps(payload.get('earnings', {}), ensure_ascii=False)}
+{_json_text(payload.get('earnings', {}))}
 
 Company detail:
-{json.dumps(payload.get('detail', {}), ensure_ascii=False)}
+{_json_text(payload.get('detail', {}))}
 
 Relevant company news:
-{json.dumps(payload.get('headlines', [])[:6], ensure_ascii=False)}
+{_json_text(payload.get('headlines', [])[:6])}
 
 Transcript metadata:
-{json.dumps({
+{_json_text({
     'status': (payload.get('transcript') or {}).get('status'),
     'provider': (payload.get('transcript') or {}).get('provider'),
     'quarter': (payload.get('transcript') or {}).get('quarter'),
     'management_excerpt': (payload.get('transcript') or {}).get('management_excerpt'),
     'qa_excerpt': (payload.get('transcript') or {}).get('qa_excerpt'),
     'catalysts': (payload.get('transcript') or {}).get('catalysts'),
-}, ensure_ascii=False)}
+})}
 
 Return ONLY valid JSON with this exact structure:
 {{
@@ -809,13 +813,13 @@ Current UTC time:
 {datetime.now(timezone.utc).isoformat()}
 
 Broader market context:
-{json.dumps(payload.get('market_context', {}), ensure_ascii=False)}
+{_json_text(payload.get('market_context', {}))}
 
 Company detail:
-{json.dumps(payload.get('detail', {}), ensure_ascii=False)}
+{_json_text(payload.get('detail', {}))}
 
 Recent company news:
-{json.dumps(payload.get('headlines', [])[:6], ensure_ascii=False)}
+{_json_text(payload.get('headlines', [])[:6])}
 
 Return ONLY valid JSON with this exact structure:
 {{

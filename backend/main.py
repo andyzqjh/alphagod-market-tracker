@@ -145,11 +145,15 @@ def _market_context_snapshot() -> dict:
 
 
 def _earnings_tracker_for_deep_dive():
+    for key in ('earnings_tracker_21_24', 'earnings_tracker_21_40', 'earnings_tracker_45_60'):
+        cached = get_cached(key, ttl=300)
+        if cached:
+            return cached
     key = 'earnings_tracker_deep_dive'
     cached = get_cached(key, ttl=300)
     if cached:
         return cached
-    tracker = get_earnings_tracker(days_ahead=45, limit=200, lookback_days=45)
+    tracker = get_earnings_tracker(days_ahead=21, limit=40, lookback_days=45)
     set_cache(key, tracker)
     return tracker
 

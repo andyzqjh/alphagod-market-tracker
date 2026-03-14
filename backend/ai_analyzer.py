@@ -575,10 +575,10 @@ def build_earnings_brief(earnings_tracker: dict) -> dict:
     prompt = f"""You are writing a concise earnings tracker brief for an active trader.
 
 Earnings tracker summary:
-{json.dumps(earnings_tracker.get('summary', {}), ensure_ascii=False)}
+{_json_text(earnings_tracker.get('summary', {}))}
 
 Recent and upcoming earnings rows:
-{json.dumps(earnings_tracker.get('items', [])[:30], ensure_ascii=False)}
+{_json_text(earnings_tracker.get('items', [])[:30])}
 
 Return ONLY valid JSON with this exact structure:
 {{

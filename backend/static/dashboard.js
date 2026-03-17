@@ -327,7 +327,7 @@
     if (!Array.isArray(blocks) || !blocks.length) {
       return '<div class="analysis-block"><div class="mini-label">Awaiting</div><div class="tiny-copy">No analysis blocks are available yet.</div></div>';
     }
-    return blocks.slice(0, 3).map((block) => `
+    return blocks.slice(0, 4).map((block) => `
       <div class="analysis-block">
         <div class="mini-label">${esc(block.title || 'Analysis')}</div>
         <div class="tiny-copy">${esc(block.body || 'n/a')}</div>
@@ -2386,7 +2386,7 @@
     state.errors.premarket = '';
     render();
     try {
-      state.premarket = await api('/api/session-movers/pre?min_move=0.5&limit=15', 12000);
+      state.premarket = await api('/api/session-movers/pre?min_move=0.5&limit=10', 25000);
     } catch (error) {
       console.error(error);
       state.errors.premarket = 'Unable to load the pre-market movers right now.';
@@ -2402,7 +2402,7 @@
     state.errors.postmarket = '';
     render();
     try {
-      state.postmarket = await api('/api/session-movers/post?min_move=0.5&limit=15', 12000);
+      state.postmarket = await api('/api/session-movers/post?min_move=0.5&limit=10', 25000);
     } catch (error) {
       console.error(error);
       state.errors.postmarket = 'Unable to load the post-market movers right now.';

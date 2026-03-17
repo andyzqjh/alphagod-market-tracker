@@ -10,6 +10,8 @@ from dotenv import load_dotenv
 load_dotenv()
 API_KEY = os.environ.get('ANTHROPIC_API_KEY')
 client = Anthropic(api_key=API_KEY) if API_KEY else None
+AI_TIMEOUT_SECONDS = float(os.environ.get('ANTHROPIC_TIMEOUT_SECONDS', '12'))
+USE_REMOTE_AI = os.environ.get('USE_REMOTE_AI_ANALYSIS', '').strip().lower() in ('1', 'true', 'yes', 'on')
 
 
 def _json_text(value) -> str:
@@ -23,7 +25,6 @@ def _safe_float(value):
         return float(value)
     except (TypeError, ValueError):
         return None
-AI_TIMEOUT_SECONDS = float(os.environ.get('ANTHROPIC_TIMEOUT_SECONDS', '12'))
 
 
 def _safe_json_load(text: str, fallback: dict) -> dict:
@@ -39,7 +40,8 @@ def _safe_json_load(text: str, fallback: dict) -> dict:
 
 
 def _call_json(prompt: str, fallback: dict, max_tokens: int = 900) -> dict:
-    if not client:
+    # The hosted dashboard needs deterministic latency; remote AI is opt-in.
+    if not client or not USE_REMOTE_AI:
         return fallback
 
     executor = ThreadPoolExecutor(max_workers=1)

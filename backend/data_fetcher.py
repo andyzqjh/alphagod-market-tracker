@@ -2138,6 +2138,10 @@ def _build_earnings_reasoning(event: dict, detail: dict, quote_view: dict, theme
     lead_headline = _earnings_lead_headline(headlines)
     verdict = _earnings_verdict(event, quote_view, headlines)
     reaction_pct = quote_view.get('display_change_pct')
+    narrative_shift = _earnings_narrative_shift(event, detail, quote_view, headlines)
+    before_earnings = _earnings_before_view(event, detail, themes)
+    after_earnings = _earnings_after_view(event, detail, quote_view, headlines)
+    what_they_said = _earnings_what_they_said(event, quote_view, lead_headline)
     analysis_seed = {
         'ticker': detail.get('ticker'),
         'session_pct': reaction_pct or 0,
@@ -2149,16 +2153,31 @@ def _build_earnings_reasoning(event: dict, detail: dict, quote_view: dict, theme
         _earnings_quallamaggie_criteria(event, detail, quote_view, headlines),
         _earnings_stockbee_criteria(event, detail, quote_view),
     ]
+    if verdict == 'better':
+        next_test = 'The next test is whether analysts and buyers keep lifting the next-quarter setup instead of treating this as a one-print pop.'
+    elif verdict == 'worse':
+        next_test = 'The next test is whether estimate cuts and weak price action keep confirming a real de-rating instead of a brief post-print flush.'
+    else:
+        next_test = 'The next test is whether follow-through, revisions, and management commentary resolve the mixed read into a clearer estimate direction.'
 
     return {
-        'narrative_shift': _earnings_narrative_shift(event, detail, quote_view, headlines),
-        'before_earnings': _earnings_before_view(event, detail, themes),
-        'after_earnings': _earnings_after_view(event, detail, quote_view, headlines),
-        'what_they_said': _earnings_what_they_said(event, quote_view, lead_headline),
+        'narrative_shift': narrative_shift,
+        'before_earnings': before_earnings,
+        'after_earnings': after_earnings,
+        'what_they_said': what_they_said,
         'ai_reasoning': _earnings_ai_reasoning(event, detail, quote_view, themes, headlines),
         'verdict': verdict,
         'criteria_sets': criteria_sets,
-        'analysis_blocks': _build_session_analysis_blocks(analysis_seed, detail, lead_headline, 'Earnings'),
+        'analysis_blocks': _build_session_analysis_blocks(
+            analysis_seed,
+            detail,
+            lead_headline,
+            'Earnings',
+            _perception_before(detail),
+            f'{narrative_shift} {what_they_said}'.strip(),
+            after_earnings,
+            next_test,
+        ),
         'lead_headline': lead_headline,
     }
 
@@ -2581,6 +2600,20 @@ def _headline_feature_flags(headline: Optional[dict]) -> dict:
         'ma': any(term in lowered for term in ['merger', 'acquisition', 'takeover', 'buyout']),
         'financing': any(term in lowered for term in ['offering', 'dilution', 'convertible', 'financing', 'capital raise', 'shelf']),
         'legal': any(term in lowered for term in ['lawsuit', 'probe', 'investigation', 'fraud', 'settlement', 'recall', 'delay']),
+        'insider': any(term in lowered for term in [
+            'sells shares',
+            'sell shares',
+            'sold shares',
+            'insider sale',
+            'insider selling',
+            'disposed of shares',
+            'beneficial ownership',
+            'ceo sells',
+            'cfo sells',
+            'director sells',
+            'officer sells',
+            'shares worth',
+        ]),
         'ai': any(term in lowered for term in ['ai', 'data center', 'datacenter', 'gpu', 'server', 'cloud']),
     }
 
@@ -2599,6 +2632,8 @@ def _classify_session_catalyst(headline: Optional[dict]) -> str:
         return 'Government Policy'
     if flags['ma']:
         return 'M&A'
+    if flags['insider']:
+        return 'Insider / Supply'
     if flags['financing'] or flags['legal']:
         return 'Risk / Capital Structure'
     return 'Themes / Narratives'
@@ -2782,6 +2817,8 @@ def _risk_invalidation_read(category: str, detail: dict) -> str:
         return 'The key risk is that the announcement sounds important but does not translate into durable bookings, pricing power, or margin benefit. If investors cannot model the economic impact, the rerating usually cools off.'
     if category == 'Government Policy':
         return 'Policy-driven trades can unwind when the market realizes the path from headline to actual earnings power is slower, smaller, or less direct than first assumed.'
+    if category == 'Insider / Supply':
+        return 'The risk is that insider-related selling becomes a real supply overhang. If the stock cannot absorb that distribution quickly, even otherwise decent fundamentals can stay trapped.'
     if revenue_growth is not None and revenue_growth < 8:
         return 'The risk is that the narrative improves before the underlying growth does. Without cleaner revenue acceleration and better post-open confirmation, the tape can lose interest quickly.'
     if operating_margin is not None and operating_margin <= 10:
@@ -2962,6 +2999,9 @@ def _catalyst_shift_read(category: str, detail: dict, flags: dict) -> str:
             return 'capital-structure headlines change the dilution math and often overwhelm the rest of the story until the funding overhang clears'
         return 'legal or capital-structure risk can force the market to price downside scenarios more aggressively than before'
 
+    if category == 'Insider / Supply':
+        return 'insider-distribution headlines change the supply picture and can cap the rerating case until the market sees that the stock can absorb that selling without losing sponsorship'
+
     if revenue_growth is not None and revenue_growth >= 20:
         return 'the tape is testing whether a high-growth narrative still deserves premium sponsorship instead of a quick sentiment pop'
     return 'the market is checking whether the latest headline is enough to change the multiple, not just create a temporary tape event'
@@ -2995,10 +3035,12 @@ def _session_reaction_style(item: dict, detail: dict, category: str, flags: dict
         return 'a constructive gap that still has to survive the open before institutions fully trust it'
 
     if session_pct <= -10:
-        if category in ('Earnings', 'Risk / Capital Structure'):
+        if category in ('Earnings', 'Risk / Capital Structure', 'Insider / Supply'):
             return 'a hard de-risking move that tells you the market thinks the new information changes the earnings path or downside case'
         return 'a sharp downside reset rather than a routine overnight shakeout'
 
+    if category == 'Insider / Supply':
+        return 'a supply-driven reset where traders want to see whether insider distribution creates a lasting overhang or gets absorbed quickly'
     if category == 'Analyst':
         return 'a cautious reset that can still mean-revert quickly if the broader Street does not validate the new view'
     return 'a negative reaction that still needs post-open follow-through before it becomes a durable breakdown read'
@@ -3034,6 +3076,8 @@ def _next_proof_point(item: dict, detail: dict, category: str, flags: dict) -> s
         proofs.append('evidence the milestone improves commercialization odds instead of just extending the story')
     elif category == 'Government Policy':
         proofs.append('clarity that the policy path is real enough to change demand, pricing, or costs')
+    elif category == 'Insider / Supply':
+        proofs.append('evidence the market can absorb the insider-related supply without another wave of distribution headlines')
 
     if session_rvol is not None and session_rvol < 0.04:
         proofs.append('better participation because the current extended volume is still light')
